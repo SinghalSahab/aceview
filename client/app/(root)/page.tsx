@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState } from "react";
 
-const page = () => {
+const Page = () => {
   const [message, setMessage] = useState("Loading");
   const [people, setPeople] = useState([]);
   useEffect(() => {
@@ -26,4 +26,4 @@ const page = () => {
   )
 }
 
-export default page
+export default Page
