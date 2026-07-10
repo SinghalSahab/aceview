@@ -3,6 +3,8 @@ from flask_cors import CORS
 import fitz  # PyMuPDF
 import os
 import tempfile
+import pandas as pd
+import numpy as np
 
 app = Flask(__name__)
 CORS(app)
@@ -29,6 +31,8 @@ def upload_file():
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         file_path = tmp.name
         file.save(file_path)
+
+    
 
     try:
         # Extract text using PyMuPDF (fitz)
