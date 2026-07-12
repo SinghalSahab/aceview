@@ -5,6 +5,8 @@ import os
 import tempfile
 import pandas as pd
 import numpy as np
+import pprint
+from skillExtractor import parse_resume
 
 app = Flask(__name__)
 CORS(app)
@@ -32,25 +34,30 @@ def upload_file():
         file_path = tmp.name
         file.save(file_path)
 
-    
-
     try:
         # Extract text using PyMuPDF (fitz)
         doc = fitz.open(file_path)
         text = ""
         for page in doc:
             text += page.get_text()
-            text+="/n"
-            text+="Links on this page:/n"
-            
+            text += "\n"
 
         # Clean up the temp file
         os.remove(file_path)
 
-        # Return extracted text
+        # Parse using spaCy skillExtractor
+        parsed_details = parse_resume(text)
+
+        # Print every detail parsed to the console
+        print("\n" + "="*30 + " SPACY PARSED RESUME DETAILS " + "="*30)
+        pprint.pprint(parsed_details)
+        print("="*89 + "\n")
+
+        # Return extracted text and parsed details
         return jsonify({
             "message": "File parsed successfully",
-            "text": text
+            "text": text,
+            "parsed_details": parsed_details
         })
 
     except Exception as e:
