@@ -14,24 +14,105 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(uuid()) @map("_id")
-  email     String   @unique
-  name      String?
-  files     File[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Candidate {
+  id          String   @id @default(cuid())
+  candidateId String   @unique
+
+  name        String
+
+  email        String
+  phone        String?
+  linkedin     String?
+
+  resume       Resume?
+  github       Github?
+
+  sessions     Session[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
-model File {
-  id         String    @id @default(uuid()) @map("_id")
-  name       String
-  url        String
-  userId     String
-  fileType   String
-  fileSize   Int
-  user       User     @relation(fields: [userId], references: [id])
-  uploadedAt DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+model Resume {
+  id                  String   @id @default(cuid())
+
+  candidateId         String   @unique
+  candidate           Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  rawText             String   @db.Text
+
+  skills              Json
+
+  experience          Json
+
+  education           Json
+
+  yearsOfExperience   Float
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }
 
+model Github {
+  id            String   @id @default(cuid())
+
+  candidateId   String   @unique
+  candidate     Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  username      String
+
+  repos         Repository[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Repository {
+  id                   String   @id @default(cuid())
+
+  githubId             String
+  github               Github @relation(fields: [githubId], references: [id], onDelete: Cascade)
+
+  name                 String
+
+  description          String? @db.Text
+
+  readmeText           String? @db.Text
+
+  languages            Json
+
+  architectureScore    Float
+
+  testingScore         Float
+
+  complexityScore      Float
+
+  documentationScore   Float
+
+  commitScore          Float
+
+  overallCodeScore     Float
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model Session {
+  id                   String   @id @default(cuid())
+
+  sessionId            String   @unique
+
+  candidateId          String
+  candidate            Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  transcript           Json
+
+  memorySummary        String? @db.Text
+
+  currentDifficulty    String
+
+  scores               Json
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
