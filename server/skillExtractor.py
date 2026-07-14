@@ -1,5 +1,5 @@
 """
-skill_extractor.py
+skillExtractor.py
 
 spaCy-based structured parsing for resume text extracted via PyMuPDF.
 
