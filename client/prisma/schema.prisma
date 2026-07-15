@@ -14,105 +14,188 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+
+
+enum Speaker {
+  INTERVIEWER
+  CANDIDATE
+}
+
 model Candidate {
-  id          String   @id @default(cuid())
-  candidateId String   @unique
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  phone     String?
+  linkedin  String?
 
-  name        String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  email        String
-  phone        String?
-  linkedin     String?
-
-  resume       Resume?
-  github       Github?
-
-  sessions     Session[]
-
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  resume    Resume?
+  github    GithubProfile?
+  sessions  InterviewSession[]
 }
 
 model Resume {
-  id                  String   @id @default(cuid())
+  id                  String   @id @default(uuid())
+  rawText             String   @db.Text
+  yearsOfExperience   Float
 
   candidateId         String   @unique
   candidate           Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
-  rawText             String   @db.Text
+  skills              ResumeSkill[]
+  experiences         Experience[]
+  educations          Education[]
+}
 
-  skills              Json
+model ResumeSkill {
+  id        String @id @default(uuid())
+  name      String
 
-  experience          Json
+  resumeId  String
+  resume    Resume @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+}
 
-  education           Json
+model Experience {
+  id          String @id @default(uuid())
 
-  yearsOfExperience   Float
+  company     String
+  role        String
+
+  startDate   DateTime?
+  endDate     DateTime?
+
+  description String @db.Text
+
+  resumeId    String
+  resume      Resume @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+}
+
+model Education {
+  id            String @id @default(uuid())
+
+  institution   String
+  degree        String
+
+  startYear     Int?
+  endYear       Int?
+
+  resumeId      String
+  resume        Resume @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+}
+
+model GithubProfile {
+  id              String @id @default(uuid())
+
+  username        String @unique
+
+  aggregateScore  Float?
+
+  candidateId     String @unique
+  candidate        Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  repos           GithubRepo[]
+}
+
+model GithubRepo {
+  id                  String @id @default(uuid())
+
+  name                String
+  description         String?
+  readmeText          String? @db.Text
+
+  languages           Json
+
+  architectureScore   Float
+  testingScore        Float
+  complexityScore     Float
+  documentationScore  Float
+  commitScore         Float
+  overallCodeScore    Float
+
+  githubProfileId     String
+  githubProfile       GithubProfile @relation(fields: [githubProfileId], references: [id], onDelete: Cascade)
+}
+
+model InterviewSession {
+  id                  String @id @default(uuid())
+
+  memorySummary       String? @db.Text
+  currentDifficulty   Int @default(2)
 
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+
+  candidateId         String
+  candidate           Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  transcripts         Transcript[]
+  evaluations         Evaluation[]
 }
 
-model Github {
-  id            String   @id @default(cuid())
+model Transcript {
+  id          String @id @default(uuid())
 
-  candidateId   String   @unique
-  candidate     Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  speaker     Speaker
 
-  username      String
+  text        String @db.Text
 
-  repos         Repository[]
+  createdAt   DateTime @default(now())
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  sessionId   String
+  session     InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }
 
-model Repository {
-  id                   String   @id @default(cuid())
+model Rubric {
+  id          String @id @default(uuid())
 
-  githubId             String
-  github               Github @relation(fields: [githubId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
 
-  name                 String
+  criteria    Json
 
-  description          String? @db.Text
-
-  readmeText           String? @db.Text
-
-  languages            Json
-
-  architectureScore    Float
-
-  testingScore         Float
-
-  complexityScore      Float
-
-  documentationScore   Float
-
-  commitScore          Float
-
-  overallCodeScore     Float
-
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  questions   Question[]
 }
 
-model Session {
-  id                   String   @id @default(cuid())
+model Question {
+  id                  String @id @default(uuid())
 
-  sessionId            String   @unique
+  text                String @db.Text
 
-  candidateId          String
-  candidate            Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  topic               String
 
-  transcript           Json
+  difficulty          Int
 
-  memorySummary        String? @db.Text
+  sourceRepo          String?
+  skillRef            String?
 
-  currentDifficulty    String
+  expectedKeyPoints   Json
 
-  scores               Json
+  rubricId            String
+  rubric              Rubric @relation(fields: [rubricId], references: [id])
 
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  evaluations         Evaluation[]
+}
+
+model Evaluation {
+  id                      String @id @default(uuid())
+
+  rubricScore             Float
+  keywordScore            Float
+  embeddingScore          Float
+  reasoningScore          Float
+  finalScore              Float
+
+  breakdownExplanation    String @db.Text
+
+  flaggedForReview        Boolean @default(false)
+
+  createdAt               DateTime @default(now())
+
+  questionId              String
+  question                Question @relation(fields: [questionId], references: [id])
+
+  sessionId               String
+  session                 InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }
