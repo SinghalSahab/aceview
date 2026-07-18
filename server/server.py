@@ -53,14 +53,37 @@ def upload_file():
         pprint.pprint(parsed_details)
         print("="*89 + "\n")
 
-        # Return extracted text and parsed details
-        return jsonify({
-            "message": "File parsed successfully",
+        validation = parsed_details.get("validation", {})
+
+        # "failed" = no name AND no skills detected — almost certainly a
+        # parsing failure (e.g. scanned/image-only PDF), so reject rather
+        # than silently passing an unusable profile downstream.
+        if validation.get("status") == "failed":
+            return jsonify({
+                "error": "Resume parsing failed — no name or skills could be detected. "
+                         "This usually means the PDF is scanned/image-only or has no "
+                         "extractable text. Try a text-based PDF export instead.",
+                "issues": validation.get("issues", []),
+                "text": text,
+                "parsed_details": parsed_details
+            }), 422
+
+        # "flagged" = parsed, but something looks thin (e.g. no email) —
+        # still returned as a usable profile, with the issues surfaced so
+        # the frontend can show a warning instead of pretending it's perfect.
+        response_payload = {
+            "message": "File parsed successfully"
+                        if validation.get("status") == "ok"
+                        else "File parsed with warnings",
             "text": text,
             "parsed_details": parsed_details
-        })
+        }
+        return jsonify(response_payload)
 
     except Exception as e:
+        # Best-effort cleanup if we failed before os.remove() above
+        if os.path.exists(file_path):
+            os.remove(file_path)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
