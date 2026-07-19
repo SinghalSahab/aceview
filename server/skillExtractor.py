@@ -5,18 +5,26 @@ spaCy-based structured parsing for resume text extracted via PyMuPDF.
 
 Uses:
 - en_core_web_sm for base NLP (tokenization, POS, base NER for PERSON/ORG/GPE/DATE)
-- An EntityRuler loaded from skills.jsonl for domain-specific SKILL matching
-  (skills.jsonl is a list of {"label": "SKILL", "pattern": [...]} spaCy pattern objects)
-- Regex for structured fields spaCy's NER isn't reliable for (email, phone, links)
-- Light heuristics for resume sections (education / experience) and candidate name
+- An EntityRuler loaded from skills.jsonl + a supplementary in-code tech-term
+  pattern list for domain-specific SKILL matching
+- Regex for structured fields spaCy's NER isn't reliable for (email, phone)
+- Position/hyperlink-aware link extraction (see LINKS section) — PDF resumes
+  almost always embed URLs as invisible link annotations behind short anchor
+  text ("GitHub", "Live"), not as literal visible URL text, so plain text
+  extraction alone can never find them; this module optionally accepts a
+  `layout` argument (word bboxes + link annotations, built in app.py from
+  fitz) to resolve those links and attribute each one to a section/project.
+- Light heuristics for resume sections (education / experience / achievements
+  / etc.) and candidate name
 
 This module is import-and-reuse: load the spaCy pipeline ONCE at process start
-(model loading is slow), then call `parse_resume(text)` per request.
+(model loading is slow), then call `parse_resume(text, layout=...)` per request.
 """
 
 import re
 import json
 import os
+from collections import defaultdict
 from datetime import datetime
 from functools import lru_cache
 
@@ -37,9 +45,6 @@ LINKEDIN_RE = re.compile(r"(https?://)?(www\.)?linkedin\.com/in/[A-Za-z0-9\-_/]+
 GITHUB_RE = re.compile(r"(https?://)?(www\.)?github\.com/[A-Za-z0-9\-_/]+", re.I)
 URL_RE = re.compile(r"https?://[^\s)]+")
 
-# Explicit "5 years of experience" style phrase — checked first, before the
-# DATE-entity fallback, since an explicit claim is more reliable than summing
-# inferred date ranges.
 YEARS_PHRASE_RE = re.compile(
     r"(\d+(?:\.\d+)?)\+?\s*(?:years|yrs)\s*(?:of)?\s*experience", re.I
 )
@@ -48,12 +53,17 @@ MONTH_RE = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|j
 YEAR_RE = r"(?:19|20)\d{2}"
 PRESENT_RE = r"present|current|now|ongoing"
 
+DATE_RANGE_RE = re.compile(
+    rf"({MONTH_RE}\.?\s+{YEAR_RE}|{YEAR_RE})\s*(?:-|–|—|to)\s*"
+    rf"({MONTH_RE}\.?\s+{YEAR_RE}|{YEAR_RE}|{PRESENT_RE})",
+    re.I,
+)
+
 # ---------------------------------------------------------------------------
-# Section headers commonly found in resumes — used to slice the raw text into
-# blocks so we can tell "education" text apart from "experience" text instead
-# of just dumping every DATE/ORG entity into one bucket. This also lets
-# downstream GitHub-project matching (Step 5) reason about "projects section"
-# vs. "work experience" separately.
+# Section headers. Extended with achievement/award/publication/etc. aliases
+# (a common gap: without these, that content silently got merged into
+# whatever section happened to precede it — e.g. "Achievements" bullets
+# ending up inside "skills").
 # ---------------------------------------------------------------------------
 SECTION_HEADERS = {
     "education": ["education", "academic background", "academics"],
@@ -62,7 +72,102 @@ SECTION_HEADERS = {
     "skills": ["skills", "technical skills", "core competencies"],
     "certifications": ["certifications", "certificates", "licenses"],
     "summary": ["summary", "objective", "profile"],
+    "achievements": ["achievements", "accomplishments", "awards", "honors", "honours"],
+    "publications": ["publications"],
+    "leadership": ["leadership", "leadership experience"],
+    "volunteer": ["volunteer", "volunteering", "volunteer experience", "community involvement"],
+    "extracurricular": ["extracurricular", "extra-curricular", "activities", "extracurricular activities"],
+    "languages_spoken": ["languages spoken", "spoken languages"],
+    "interests": ["interests", "hobbies"],
+    "references": ["references"],
 }
+
+# Sections where sub-entry titles (job titles, school names, project names)
+# commonly look header-like (short, Title Case) but must NOT be treated as
+# new top-level sections — only known headers can end these sections.
+_NO_GENERIC_SPLIT_SECTIONS = {"header", "experience", "education", "projects"}
+
+# Marker lines inside a Projects block that are never a project title
+# themselves (link-anchor lines like "Live", "GitHub", or combined "Live
+# GitHub" on one physical line, plus the "Technologies:" summary line).
+_PROJECT_LINK_MARKER_WORDS = {"live", "github", "demo", "code", "view", "source", "repo", "link", "url"}
+
+
+def _is_project_marker_line(plain: str) -> bool:
+    """True if every word on the line is a link-anchor marker word (e.g.
+    'live', 'github', or both together as 'live github') rather than an
+    actual project title — checked word-by-word since PyMuPDF groups
+    multiple adjacent short words (like "Live" and "GitHub") onto a single
+    line, so an exact whole-string match against a single marker word would
+    miss the combined case entirely."""
+    if not plain:
+        return False
+    if plain.startswith("technologies"):
+        return True
+    words = plain.split()
+    return bool(words) and all(w in _PROJECT_LINK_MARKER_WORDS for w in words)
+
+
+# ---------------------------------------------------------------------------
+# Supplementary SKILL patterns.
+#
+# skills.jsonl is the primary, user-owned source of truth for SKILL patterns
+# and is never modified here. But any term not covered by it falls through
+# to spaCy's generic statistical NER, which frequently mis-tags common tech
+# acronyms/tools as ORG, PERSON, GPE, or NORP (e.g. "JWT" -> ORG, "RAG" ->
+# PERSON, "Monaco" -> NORP, "LangChain" -> ORG). Because the EntityRuler
+# below is inserted BEFORE the statistical `ner` component, any span it
+# claims is left alone by `ner` entirely — so adding a term here is what
+# actually fixes both problems at once: the term stops polluting
+# organizations/other labels, AND it starts showing up correctly in the
+# `skills` array. Extend this list over time as new gaps show up.
+# ---------------------------------------------------------------------------
+def _text_pattern(*tokens):
+    return [{"TEXT": t} for t in tokens]
+
+
+def _lower_pattern(*tokens):
+    return [{"LOWER": t.lower()} for t in tokens]
+
+
+SUPPLEMENTARY_SKILL_PATTERNS = [
+    {"label": "SKILL", "pattern": _text_pattern("JWT")},
+    {"label": "SKILL", "pattern": _text_pattern("RDS")},
+    {"label": "SKILL", "pattern": _text_pattern("S3")},
+    {"label": "SKILL", "pattern": _text_pattern("EC2")},
+    {"label": "SKILL", "pattern": _text_pattern("IAM")},
+    {"label": "SKILL", "pattern": _text_pattern("Amplify")},
+    {"label": "SKILL", "pattern": _text_pattern("Cognito")},
+    {"label": "SKILL", "pattern": _text_pattern("PM2")},
+    {"label": "SKILL", "pattern": _text_pattern("AWS")},
+    {"label": "SKILL", "pattern": _text_pattern("WebContainers")},
+    {"label": "SKILL", "pattern": _text_pattern("WebSockets")},
+    {"label": "SKILL", "pattern": _lower_pattern("websocket")},
+    {"label": "SKILL", "pattern": _text_pattern("LangChain")},
+    {"label": "SKILL", "pattern": _text_pattern("LangGraph")},
+    {"label": "SKILL", "pattern": _text_pattern("Monaco", "Editor")},
+    {"label": "SKILL", "pattern": _text_pattern("Monaco")},
+    {"label": "SKILL", "pattern": _text_pattern("Pinecone")},
+    {"label": "SKILL", "pattern": _text_pattern("RAG")},
+    {"label": "SKILL", "pattern": _lower_pattern("retrieval-augmented", "generation")},
+    {"label": "SKILL", "pattern": _lower_pattern("ai", "agents")},
+    {"label": "SKILL", "pattern": _lower_pattern("vector", "databases")},
+    {"label": "SKILL", "pattern": _lower_pattern("vector", "database")},
+    {"label": "SKILL", "pattern": _text_pattern("OpenAI")},
+    {"label": "SKILL", "pattern": _lower_pattern("gemini")},
+    {"label": "SKILL", "pattern": _text_pattern("OAuth")},
+    {"label": "SKILL", "pattern": _text_pattern("CI/CD")},
+    {"label": "SKILL", "pattern": _text_pattern("CI")},
+    {"label": "SKILL", "pattern": _text_pattern("DSA")},
+    {"label": "SKILL", "pattern": _text_pattern("Golang")},
+    {"label": "SKILL", "pattern": _text_pattern("MERN")},
+    {"label": "SKILL", "pattern": _text_pattern("Express.js")},
+    {"label": "SKILL", "pattern": _lower_pattern("express", "js")},
+    {"label": "SKILL", "pattern": _text_pattern("GitHub", "Actions")},
+    {"label": "SKILL", "pattern": _text_pattern("Zoom")},
+    {"label": "SKILL", "pattern": _lower_pattern("restful", "apis")},
+    {"label": "SKILL", "pattern": _lower_pattern("restful", "api")},
+]
 
 
 def _load_skill_patterns(path: str):
@@ -80,26 +185,25 @@ def _load_skill_patterns(path: str):
 def get_nlp():
     """
     Build (once, cached) the spaCy pipeline:
-    base en_core_web_sm + EntityRuler seeded with skills.jsonl patterns.
+    base en_core_web_sm + EntityRuler seeded with skills.jsonl patterns +
+    SUPPLEMENTARY_SKILL_PATTERNS.
 
-    EntityRuler is inserted BEFORE the statistical `ner` component so exact
-    skill patterns (e.g. ".NET", "machine learning") win over/are protected
-    from the statistical model on overlapping spans.
+    EntityRuler is inserted BEFORE the statistical `ner` component. spaCy's
+    ner treats tokens already covered by an existing entity span as resolved
+    and skips them — it will not attempt to relabel them — so any term
+    matched here is protected from ORG/PERSON/GPE/NORP mis-tagging.
     """
     nlp = spacy.load("en_core_web_sm")
 
     ruler = nlp.add_pipe("entity_ruler", before="ner", config={"overwrite_ents": True})
     ruler.add_patterns(_load_skill_patterns(SKILLS_PATTERN_PATH))
+    ruler.add_patterns(SUPPLEMENTARY_SKILL_PATTERNS)
 
     return nlp
 
 
 # ---------------------------------------------------------------------------
-# Skill normalization — builds a canonical "display casing" map straight from
-# skills.jsonl, keyed by a punctuation/space-insensitive lowercase form, so
-# skills extracted here can later be cross-referenced 1:1 against
-# GitHub-detected languages/skills (ATS scoring + question generation both
-# need this to be the same key space).
+# Skill normalization
 # ---------------------------------------------------------------------------
 def _normalize_key(text: str) -> str:
     """Punctuation/space-insensitive comparison key, e.g. '.NET' and 'net' -> 'net'."""
@@ -110,10 +214,9 @@ def _pattern_tokens_to_text(pattern):
     """
     Reconstruct a display string from a spaCy EntityRuler token pattern.
     Returns (text, has_explicit_casing) — has_explicit_casing is True only
-    when the pattern uses a TEXT token (exact string, e.g. {"TEXT": ".NET"}),
-    which is the only case where skills.jsonl encodes a real casing/format
-    decision. Patterns built only from LOWER tokens (the overwhelming
-    majority in skills.jsonl) carry no casing information at all.
+    when the pattern uses a TEXT token (exact string), the only case where a
+    pattern actually encodes a real casing/format decision. Patterns built
+    purely from LOWER tokens carry no casing information.
     """
     if isinstance(pattern, str):
         return pattern.strip(), True
@@ -133,17 +236,15 @@ def _pattern_tokens_to_text(pattern):
 @lru_cache(maxsize=1)
 def get_skill_canonical_map() -> dict:
     """
-    key (normalized, e.g. 'net') -> canonical display text (e.g. '.NET')
-
-    Only populated from patterns that explicitly encode casing via a TEXT
-    token (e.g. ".NET", "3D", acronym-style entries). skills.jsonl patterns
-    built purely from LOWER tokens (the majority — "python", "docker", ...)
-    are intentionally left OUT of this map: they carry no real casing intent,
-    so for those, normalize_skill() below keeps whatever casing the resume
-    itself used rather than forcing everything to lowercase.
+    key (normalized) -> canonical display text, built ONLY from patterns that
+    explicitly encode casing via a TEXT token (from skills.jsonl AND
+    SUPPLEMENTARY_SKILL_PATTERNS). Patterns built purely from LOWER tokens
+    are left out so normalize_skill() keeps the resume's own casing for
+    those instead of flattening everything to lowercase.
     """
     canonical = {}
-    for entry in _load_skill_patterns(SKILLS_PATTERN_PATH):
+    all_patterns = _load_skill_patterns(SKILLS_PATTERN_PATH) + SUPPLEMENTARY_SKILL_PATTERNS
+    for entry in all_patterns:
         text, has_explicit_casing = _pattern_tokens_to_text(entry.get("pattern", []))
         if not text or not has_explicit_casing:
             continue
@@ -158,97 +259,467 @@ def get_skill_canonical_map() -> dict:
 
 def normalize_skill(skill_text: str) -> str:
     """
-    Public helper — normalize a single skill string (from resume OR GitHub
-    language/topic detection) to a canonical display form:
-    - If skills.jsonl explicitly encodes casing for this skill (a TEXT-token
-      pattern, e.g. ".NET"), use that.
-    - Otherwise, keep the casing as it was actually written (in the resume,
-      or whatever the caller passed in) rather than flattening to lowercase.
-    The normalized KEY (used for dedupe/cross-referencing) is always
-    punctuation/space/case-insensitive regardless of which casing is shown.
+    Normalize a single skill string (from resume NER, the deterministic
+    skills-section parse, or GitHub language/topic detection later) to a
+    canonical display form where one is known; otherwise keep the casing as
+    written. The normalized KEY (used for dedupe/cross-referencing) is
+    always punctuation/space/case-insensitive regardless of display casing.
     """
     key = _normalize_key(skill_text)
     return get_skill_canonical_map().get(key, skill_text.strip())
 
 
+_HEADER_ALIAS_KEYS = {
+    _normalize_key(alias) for aliases in SECTION_HEADERS.values() for alias in aliases
+}
+
+
 def _normalize_and_dedupe_skills(raw_skills) -> list:
-    """Dedupe by normalized key, keep the canonical casing per key."""
     deduped = {}
     for s in raw_skills:
         s = s.strip()
-        if not s:
+        if not s or len(s) > 60:
             continue
         key = _normalize_key(s)
-        if not key:
+        if not key or key in _SKILL_LABEL_STOPWORDS:
+            # structural category-label words (e.g. "Technical Skills",
+            # "Languages") sometimes get matched as if they were themselves
+            # a skill — these are section/category labels, not real skills.
             continue
         deduped[key] = normalize_skill(s)
     return sorted(deduped.values(), key=str.lower)
 
 
+def _extract_skills_from_skills_section(skills_section_text: str) -> list:
+    """
+    Deterministic extraction directly from the Skills section text: resumes
+    almost always list skills as "<Category>: term, term, term" per
+    line/bullet, sometimes with a parenthetical sub-list like
+    "AWS (EC2, RDS, S3, Amplify, Cognito)". NER (even with the supplementary
+    patterns above) can still miss terms neither list anticipated, so this
+    pass acts as a comprehensive floor — it's what actually closes the
+    "skills section lists everything, but the skills array is missing half
+    of it" gap, rather than relying purely on catching every possible term
+    via patterns.
+    """
+    if not skills_section_text.strip():
+        return []
+    terms = []
+    for line in skills_section_text.splitlines():
+        line = re.sub(r"^[\-\*\u2022\u25CF\u25AA\s]+", "", line).strip()
+        if not line:
+            continue
+        if ":" in line:
+            _, line = line.split(":", 1)
+
+        # Harvest parenthetical sub-lists as their own terms BEFORE the main
+        # comma split, so "AWS (EC2, RDS, S3)" yields "AWS", "EC2", "RDS",
+        # "S3" rather than a naive split producing a mangled "AWS (EC2"
+        # chunk (the comma inside the parens would otherwise be treated as
+        # a top-level separator).
+        def _harvest_parens(m):
+            for sub in m.group(1).split(","):
+                sub = sub.strip()
+                if sub:
+                    terms.append(sub)
+            return " "
+
+        line = re.sub(r"\(([^)]*)\)", _harvest_parens, line)
+
+        for chunk in line.split(","):
+            chunk = chunk.strip().strip(".")
+            if chunk and len(chunk) <= 40:
+                terms.append(chunk)
+    return terms
+
+
 # ---------------------------------------------------------------------------
-# Section splitting
+# Organization cleanup — drops NER false positives (bullet-prefixed
+# fragments like "• Owned", roman-numeral class levels like "XII") that are
+# neither real organizations nor skills, and trims trailing month tokens
+# that sometimes get swept into an ORG span (e.g. "... Technology Jul").
 # ---------------------------------------------------------------------------
+_ORG_NOISE_PREFIXES = ("•", "-", "*", "◦")
+_ROMAN_NUMERAL_RE = re.compile(r"^(?:I{1,3}|IV|VI{0,3}|IX|XI{0,3}|XIV|XV)$")
+_TRAILING_MONTH_RE = re.compile(rf"\s+{MONTH_RE}\.?$", re.I)
+
+
+def _clean_organizations(raw_orgs):
+    cleaned = set()
+    for org in raw_orgs:
+        stripped = org.strip()
+        if not stripped:
+            continue
+        # NER spans occasionally cross line boundaries and sweep up
+        # unrelated following lines (e.g. "Acme Corp\nJan 2021 - Present\n
+        # Projects") — the real org name is reliably the first line only.
+        stripped = stripped.split("\n")[0].strip()
+        if not stripped:
+            continue
+        if stripped.startswith(_ORG_NOISE_PREFIXES):
+            continue  # bullet-fragment NER false positive, not a real entity
+        if _ROMAN_NUMERAL_RE.match(stripped):
+            continue  # e.g. "XII" from "Class XII" — not an organization
+        stripped = _TRAILING_MONTH_RE.sub("", stripped).strip()
+        if not stripped:
+            continue
+        cleaned.add(stripped)
+    return sorted(cleaned, key=str.lower)
+
+
+# ---------------------------------------------------------------------------
+# Section splitting (string-only fallback, used when no PDF layout/position
+# data is available — e.g. plain-text input).
+# ---------------------------------------------------------------------------
+def _header_lookup():
+    lookup = {}
+    for key, aliases in SECTION_HEADERS.items():
+        for alias in aliases:
+            lookup[alias] = key
+    return lookup
+
+
+def _looks_like_header_line(clean_line: str) -> bool:
+    """
+    Generic section-header heuristic for headings not in SECTION_HEADERS.
+
+    Deliberately requires ALL CAPS rather than "Title Case, few words" — an
+    earlier version accepted Title Case too, but that false-positived on
+    short plain entries that merely happen to look header-like (e.g. a
+    degree/grade line like "Class XII CBSE", or a short company name).
+    ALL CAPS is a much less ambiguous signal for an actual section header in
+    plain resume text. The trade-off: a genuinely novel Title-Case heading
+    not already in SECTION_HEADERS won't be auto-detected — extend
+    SECTION_HEADERS with new aliases as real gaps are found instead of
+    loosening this check back up.
+    """
+    if not clean_line or len(clean_line) > 40:
+        return False
+    if clean_line.startswith(("-", "*", "\u2022", "\u25CF", "\u25AA")):
+        return False
+    if clean_line.endswith((".", ",", ";")):
+        return False
+    if ":" in clean_line:
+        return False
+    words = clean_line.split()
+    if not (1 <= len(words) <= 4):
+        return False
+    letters_only = re.sub(r"[^A-Za-z]", "", clean_line)
+    if len(letters_only) < 3:
+        return False
+    return clean_line.isupper()
+
+
+def _slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _looks_like_project_title(clean_line: str) -> bool:
+    """
+    Lenient title heuristic used ONLY inside the Projects section (a much
+    narrower, safer context than general header detection — we already know
+    we're inside "projects", so a short non-bullet, non-marker line is
+    almost always a project name). Unlike _looks_like_header_line, this
+    allows Title Case, since project titles are conventionally Title Case
+    rather than ALL CAPS.
+    """
+    if not clean_line or len(clean_line) > 60:
+        return False
+    if clean_line.startswith(("-", "*", "\u2022", "\u25CF", "\u25AA")):
+        return False
+    if ":" in clean_line:
+        return False
+    words = clean_line.split()
+    if not (1 <= len(words) <= 8):
+        return False
+    return True
+
+
+# Category-LABEL words that sometimes get matched as if they were a skill in
+# their own right (e.g. the literal word "Languages" heading a programming-
+# languages sub-list, or "Technical Skills" itself). Kept separate from
+# _HEADER_ALIAS_KEYS (which controls section *splitting* further below)
+# because a word can need different treatment for splitting vs. for being
+# filtered out of the skills array.
+_SKILL_LABEL_STOPWORDS = {
+    _normalize_key(w) for w in [
+        "languages", "language", "skills", "technical skills", "technologies",
+        "tools", "frameworks", "databases", "database", "cloud", "frontend",
+        "backend", "devops", "generative ai", "core competencies",
+    ]
+}
+
+
 def _split_sections(text: str):
     """
-    Line-by-line section splitter: whenever a line IS a known header (allowing
-    for bullet prefixes, ALL CAPS, trailing colon, or a header immediately
-    followed by inline content after a colon, e.g. "Skills: Python, SQL"),
-    everything from that point is bucketed under that section until the next
-    header. Short-line-only matching avoids false-positiving on a sentence
-    that happens to contain the word "experience".
+    String-only section splitter (no position data). Known headers always
+    start a new section. Elsewhere — except inside header/experience/
+    education/projects, where sub-entry titles look header-like but aren't —
+    a generic header-looking line starts a new, dynamically-named section,
+    so an unanticipated heading (anything not in SECTION_HEADERS) still gets
+    its own bucket instead of being silently absorbed into whatever came
+    before it.
     """
+    lookup = _header_lookup()
     lines = text.splitlines()
     sections = {"header": []}
     current = "header"
 
-    header_lookup = {}
-    for key, aliases in SECTION_HEADERS.items():
-        for alias in aliases:
-            header_lookup[alias] = key
-
     for line in lines:
         raw = line.strip()
-        # strip common bullet/marker prefixes before checking for a header match
-        candidate_line = re.sub(r"^[\-\*\u2022\u25CF\u25AA\s]+", "", raw)
+        candidate = re.sub(r"^[\-\*\u2022\u25CF\u25AA\s]+", "", raw)
+        plain = candidate.lower().rstrip(":").strip()
 
-        matched_key = None
-        inline_rest = ""
-
-        # Case A: the whole (stripped) line is just the header
-        plain = candidate_line.lower().rstrip(":").strip()
-        if plain and len(plain) < 40 and plain in header_lookup:
-            matched_key = header_lookup[plain]
-
-        # Case B: "Header: inline content on the same line"
-        elif ":" in candidate_line:
-            head_part, rest_part = candidate_line.split(":", 1)
-            head_key = head_part.strip().lower()
-            if head_key and len(head_key) < 40 and head_key in header_lookup:
-                matched_key = header_lookup[head_key]
-                inline_rest = rest_part.strip()
-
-        if matched_key:
-            current = matched_key
+        if plain and len(plain) < 40 and plain in lookup:
+            current = lookup[plain]
             sections.setdefault(current, [])
-            if inline_rest:
-                sections[current].append(inline_rest)
             continue
+
+        if ":" in candidate:
+            head_part, rest_part = candidate.split(":", 1)
+            head_key = head_part.strip().lower()
+            if head_key and len(head_key) < 40 and head_key in lookup:
+                current = lookup[head_key]
+                sections.setdefault(current, [])
+                rest_part = rest_part.strip()
+                if rest_part:
+                    sections[current].append(rest_part)
+                continue
+
+        if current not in _NO_GENERIC_SPLIT_SECTIONS and _looks_like_header_line(candidate):
+            key = _slugify(candidate)
+            if key:
+                current = key
+                sections.setdefault(current, [])
+                continue
 
         sections.setdefault(current, []).append(line)
 
     return {k: "\n".join(v).strip() for k, v in sections.items()}
 
 
+# ---------------------------------------------------------------------------
+# Position-aware section + project assignment (used when PDF layout data
+# IS available). Mirrors the logic of _split_sections above but operates on
+# word-grouped lines carrying (x, y) bounding boxes, which is what lets link
+# annotations be attributed to the right section/project by position.
+# ---------------------------------------------------------------------------
+def _words_to_lines(words):
+    grouped = defaultdict(list)
+    for w in words:
+        grouped[(w["page"], w["block"], w["line"])].append(w)
+    lines = []
+    for key, ws in grouped.items():
+        ws_sorted = sorted(ws, key=lambda w: w["word_no"])
+        text = " ".join(w["text"] for w in ws_sorted)
+        lines.append({
+            "text": text,
+            "x0": min(w["x0"] for w in ws_sorted),
+            "x1": max(w["x1"] for w in ws_sorted),
+            "y0": min(w["y0"] for w in ws_sorted),
+            "y1": max(w["y1"] for w in ws_sorted),
+            "words": ws_sorted,
+        })
+    lines.sort(key=lambda l: (l["y0"], l["x0"]))
+    return lines
+
+
+def _assign_sections_positioned(lines):
+    """
+    Position-aware counterpart of _split_sections: same header-matching
+    rules, but each line also gets tagged with the y-position it starts at
+    (needed to later map a hyperlink's position to a section) and, while
+    inside "projects", with the currently-active project title so each
+    project's links can be grouped separately. A header line itself is
+    still tagged (so a link that happens to sit on that same line still
+    resolves to the right section) but marked is_header=True so
+    _sections_dict_from_tagged excludes its own text from the section body.
+    """
+    lookup = _header_lookup()
+    tagged = []
+    current = "header"
+    current_project = None
+
+    for line in lines:
+        raw = line["text"].strip()
+        candidate = re.sub(r"^[\-\*\u2022\u25CF\u25AA\s]+", "", raw)
+        plain = candidate.lower().rstrip(":").strip()
+
+        if plain and len(plain) < 40 and plain in lookup:
+            current = lookup[plain]
+            current_project = None
+            tagged.append({**line, "section": current, "project": None, "is_header": True})
+            continue
+
+        if ":" in candidate:
+            head_part, rest_part = candidate.split(":", 1)
+            head_key = head_part.strip().lower()
+            if head_key and len(head_key) < 40 and head_key in lookup:
+                current = lookup[head_key]
+                current_project = None
+                rest_part = rest_part.strip()
+                tagged.append({**line, "text": rest_part, "section": current,
+                                "project": None, "is_header": not rest_part})
+                continue
+
+        if current == "projects":
+            is_marker = _is_project_marker_line(plain)
+            if not is_marker and not candidate.startswith(("•", "-", "*")) and _looks_like_project_title(candidate):
+                current_project = candidate
+            tagged.append({**line, "section": "projects", "project": current_project, "is_header": False})
+            continue
+
+        if current not in _NO_GENERIC_SPLIT_SECTIONS and _looks_like_header_line(candidate):
+            key = _slugify(candidate)
+            if key:
+                current = key
+                current_project = None
+                tagged.append({**line, "section": current, "project": None, "is_header": True})
+                continue
+
+        tagged.append({**line, "section": current, "project": current_project, "is_header": False})
+
+    return tagged
+
+
+def _sections_dict_from_tagged(tagged_lines):
+    buckets = {}
+    for tl in tagged_lines:
+        if tl.get("is_header"):
+            buckets.setdefault(tl["section"], [])
+            continue
+        buckets.setdefault(tl["section"], []).append(tl["text"])
+    return {k: "\n".join(v).strip() for k, v in buckets.items()}
+
+
+# ---------------------------------------------------------------------------
+# Link resolution
+# ---------------------------------------------------------------------------
+def _classify_link(uri: str) -> str:
+    low = uri.lower()
+    if "linkedin.com" in low:
+        return "linkedin"
+    if "github.com" in low:
+        return "github"
+    return "other"
+
+
+def _nearest_word(words, link):
+    """Anchor-text lookup: the word whose bbox overlaps the link rect most; falls back to nearest by center distance."""
+    best, best_overlap = None, 0.0
+    for w in words:
+        ox = max(0.0, min(w["x1"], link["x1"]) - max(w["x0"], link["x0"]))
+        oy = max(0.0, min(w["y1"], link["y1"]) - max(w["y0"], link["y0"]))
+        overlap = ox * oy
+        if overlap > best_overlap:
+            best_overlap, best = overlap, w
+    if best is not None:
+        return best["text"]
+    if not words:
+        return ""
+    lcx, lcy = (link["x0"] + link["x1"]) / 2, (link["y0"] + link["y1"]) / 2
+    return min(words, key=lambda w: ((w["x0"] + w["x1"]) / 2 - lcx) ** 2 + ((w["y0"] + w["y1"]) / 2 - lcy) ** 2)["text"]
+
+
+def _resolve_positioned_links(layout, tagged_lines):
+    all_words = [w for page in layout for w in page["words"]]
+    all_links = [l for page in layout for l in page["links"]]
+    sorted_lines = sorted(tagged_lines, key=lambda l: l["y0"])
+
+    resolved = []
+    for link in all_links:
+        anchor = _nearest_word(all_words, link)
+        link_cy = (link["y0"] + link["y1"]) / 2
+
+        owning_line = None
+        for tl in sorted_lines:
+            if tl["y0"] <= link_cy + 2:
+                owning_line = tl
+            else:
+                break
+
+        resolved.append({
+            "url": link["uri"],
+            "anchor": anchor,
+            "type": _classify_link(link["uri"]),
+            "section": owning_line["section"] if owning_line else "header",
+            "project": owning_line["project"] if owning_line else None,
+        })
+    return resolved
+
+
+def _build_links_output(text, layout, tagged_lines):
+    """
+    Returns:
+      {
+        "linkedin": [...], "github": [...], "other": [...],
+        "by_section": {section_key: [{url, anchor, type}, ...]},
+        "projects": [{"project": name, "github": url|None, "live": url|None, "other": [...]}]
+      }
+
+    When `layout` (word bboxes + hyperlink annotations from the PDF) is
+    available, links are resolved by position — this is the ONLY reliable
+    path, since resume URLs are almost always PDF link annotations behind
+    plain anchor words ("GitHub", "Live") rather than literal visible URL
+    text. Without layout (plain-text-only input), falls back to regex
+    matching literal URLs in the text, which will find nothing for
+    annotation-based links — this is a known, unavoidable limitation of
+    text-only input, not a bug in the regex.
+    """
+    if layout:
+        resolved = _resolve_positioned_links(layout, tagged_lines)
+    else:
+        resolved = []
+        for pattern, ltype in ((LINKEDIN_RE, "linkedin"), (GITHUB_RE, "github")):
+            for url in _clean_links(pattern, text):
+                resolved.append({"url": url, "anchor": "", "type": ltype, "section": None, "project": None})
+        for url in sorted(set(URL_RE.findall(text))):
+            if "linkedin.com" not in url and "github.com" not in url:
+                resolved.append({"url": url, "anchor": "", "type": "other", "section": None, "project": None})
+
+    linkedin = sorted({r["url"] for r in resolved if r["type"] == "linkedin"})
+    github = sorted({r["url"] for r in resolved if r["type"] == "github"})
+    other = sorted({r["url"] for r in resolved if r["type"] == "other"})
+
+    by_section = {}
+    for r in resolved:
+        sec = r["section"] or "unknown"
+        by_section.setdefault(sec, []).append({"url": r["url"], "anchor": r["anchor"], "type": r["type"]})
+
+    projects_out = {}
+    for r in resolved:
+        if r["section"] == "projects" and r["project"]:
+            proj = projects_out.setdefault(
+                r["project"], {"project": r["project"], "github": None, "live": None, "other": []}
+            )
+            anchor_lower = (r["anchor"] or "").lower()
+            if r["type"] == "github":
+                proj["github"] = r["url"]
+            elif "live" in anchor_lower or "demo" in anchor_lower:
+                proj["live"] = r["url"]
+            else:
+                proj["other"].append(r["url"])
+
+    return {
+        "linkedin": linkedin,
+        "github": github,
+        "other": other,
+        "by_section": by_section,
+        "projects": list(projects_out.values()),
+    }
+
+
+def _clean_links(pattern: re.Pattern, text: str):
+    return sorted({m.group(0) for m in pattern.finditer(text)})
+
+
+# ---------------------------------------------------------------------------
+# Name / years-of-experience (unchanged logic from the previous version)
+# ---------------------------------------------------------------------------
 def _guess_name(doc, text: str) -> str:
-    """
-    Heuristic: the candidate's name is almost always the first PERSON entity
-    spaCy finds near the top of the document (resume headers put the name
-    first). Fall back to the first non-empty line if NER finds nothing.
-    """
     for ent in doc.ents:
         if ent.label_ == "PERSON":
             return ent.text.strip()
-
     for line in text.splitlines():
         line = line.strip()
         if line:
@@ -256,10 +727,6 @@ def _guess_name(doc, text: str) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Years of experience: explicit phrase first, DATE-entity range summation
-# as a fallback (scoped to the Experience section only).
-# ---------------------------------------------------------------------------
 def _year_from_date_text(text: str, allow_present=False):
     if allow_present and re.search(PRESENT_RE, text, re.I):
         return datetime.now().year + datetime.now().month / 12.0
@@ -270,33 +737,15 @@ def _year_from_date_text(text: str, allow_present=False):
     month_m = re.search(MONTH_RE, text, re.I)
     month_offset = 0.0
     if month_m:
-        months = ["jan", "feb", "mar", "apr", "may", "jun",
-                  "jul", "aug", "sep", "oct", "nov", "dec"]
+        months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
         mon_str = month_m.group(0)[:3].lower()
         if mon_str in months:
             month_offset = months.index(mon_str) / 12.0
     return year + month_offset
 
 
-DATE_RANGE_RE = re.compile(
-    rf"({MONTH_RE}\.?\s+{YEAR_RE}|{YEAR_RE})\s*(?:-|–|—|to)\s*"
-    rf"({MONTH_RE}\.?\s+{YEAR_RE}|{YEAR_RE}|{PRESENT_RE})",
-    re.I,
-)
-
-
 def _years_from_regex_ranges(experience_text: str):
-    """
-    Primary fallback: scan the Experience section text directly for
-    "<start> - <end>" style date ranges (the overwhelming majority of resume
-    date ranges follow this exact shape) and sum the spans. This is checked
-    BEFORE the spaCy DATE-entity pairing fallback below because, in testing,
-    en_core_web_sm's statistical NER frequently mis-tags compact bulleted
-    date ranges as ORG/PERSON instead of DATE on real resume formatting —
-    a direct regex pass over the text is materially more reliable here.
-    """
-    total_years = 0.0
-    ranges_found = 0
+    total_years, ranges_found = 0.0, 0
     for m in DATE_RANGE_RE.finditer(experience_text):
         start = _year_from_date_text(m.group(1))
         end = _year_from_date_text(m.group(2), allow_present=True)
@@ -311,26 +760,13 @@ def _years_from_regex_ranges(experience_text: str):
 
 
 def _years_from_date_entities(nlp, experience_text: str):
-    """
-    Secondary fallback: run spaCy over the Experience section text and pull
-    out DATE entities, pairing them sequentially as (start, end) ranges. Only
-    used when the regex pass above finds nothing, since DATE-entity tagging
-    on short bulleted resume text is noticeably less reliable than a direct
-    pattern match. Assumes dates appear in reading order as start/end pairs,
-    which holds for the large majority of standard resumes; overlapping
-    roles will be over-counted — this is a best-effort estimate, not an
-    exact figure.
-    """
     if not experience_text.strip():
         return None
-
     doc = nlp(experience_text)
     dates = [ent.text for ent in doc.ents if ent.label_ == "DATE"]
     if len(dates) < 2:
         return None
-
-    total_years = 0.0
-    ranges_found = 0
+    total_years, ranges_found = 0.0, 0
     i = 0
     while i < len(dates) - 1:
         start = _year_from_date_text(dates[i])
@@ -343,7 +779,6 @@ def _years_from_date_entities(nlp, experience_text: str):
             continue
         total_years += span if span > 0 else 0.5
         ranges_found += 1
-
     return round(total_years, 1) if ranges_found else None
 
 
@@ -351,37 +786,17 @@ def _extract_years_of_experience(nlp, text: str, experience_section_text: str):
     match = YEARS_PHRASE_RE.search(text)
     if match:
         return float(match.group(1))
-
     regex_result = _years_from_regex_ranges(experience_section_text)
     if regex_result is not None:
         return regex_result
-
     return _years_from_date_entities(nlp, experience_section_text)
 
 
 # ---------------------------------------------------------------------------
-# Validation against the Candidate Profile schema (resume sub-object).
-# A resume that produces neither a name nor any skills is very likely a
-# parsing failure (bad PDF extraction, scanned/image-only resume, etc.) and
-# should be flagged/rejected rather than silently treated as a thin profile.
+# Validation (unchanged from the previous version)
 # ---------------------------------------------------------------------------
 def validate_parsed_resume(result: dict) -> dict:
-    """
-    Returns:
-      {
-        "status": "ok" | "flagged" | "failed",
-        "issues": [str, ...]
-      }
-
-    - "failed": no name AND no skills detected — almost certainly a parsing
-      failure, not a genuinely empty resume. Caller (API layer) should reject
-      this rather than passing it downstream.
-    - "flagged": one of name/skills/raw text is missing or unusually thin —
-      still usable, but worth a manual look.
-    - "ok": passes baseline checks.
-    """
     issues = []
-
     has_name = bool(result.get("name"))
     has_skills = bool(result.get("skills"))
     raw_text = result.get("raw_text", "") or ""
@@ -405,50 +820,61 @@ def validate_parsed_resume(result: dict) -> dict:
     return {"status": status, "issues": issues}
 
 
-def parse_resume(text: str) -> dict:
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+def parse_resume(text: str, layout=None) -> dict:
     """
-    Main entry point. Given raw resume text (e.g. from PyMuPDF), returns a
-    structured dict:
+    Args:
+      text: raw resume text (e.g. from PyMuPDF get_text()).
+      layout: optional list of per-page dicts built by app.py:
+        [{"words": [{"text","x0","y0","x1","y1","block","line","word_no","page"}, ...],
+          "links": [{"uri","x0","y0","x1","y1"}, ...]}, ...]
+        y-coordinates must already be offset to increase monotonically across
+        pages. When omitted, section splitting falls back to string-only
+        logic and link extraction falls back to regex-over-text (which finds
+        nothing for annotation-based links — see _build_links_output).
 
+    Returns a structured dict:
     {
-      "name": str,
-      "raw_text": str,
-      "emails": [...],
-      "phones": [...],
-      "links": {"linkedin": [...], "github": [...], "other": [...]},
-      "skills": [str, ...],           # deduped + normalized to skills.jsonl canonical casing
-      "organizations": [str, ...],    # ORG entities (companies/schools)
+      "name": str, "raw_text": str,
+      "emails": [...], "phones": [...],
+      "links": {"linkedin":[...], "github":[...], "other":[...],
+                "by_section": {...}, "projects": [...]},
+      "skills": [str, ...],           # NER + supplementary patterns + deterministic skills-section parse, deduped/normalized
+      "organizations": [str, ...],    # ORG entities, noise-filtered
       "years_of_experience": float | None,
-      "sections": {                   # raw text bucketed by resume section
-          "summary": str, "education": str, "experience": str,
-          "projects": str, "skills": str, "certifications": str
-      },
-      "entities": [{"text": str, "label": str}, ...],  # full raw NER dump
+      "sections": {...},              # every detected heading gets its own key
+      "entities": [{"text":str, "label":str}, ...],
       "validation": {"status": "ok"|"flagged"|"failed", "issues": [...]}
     }
     """
     nlp = get_nlp()
     doc = nlp(text)
 
-    sections = _split_sections(text)
+    if layout:
+        all_words = [w for page in layout for w in page["words"]]
+        lines = _words_to_lines(all_words)
+        tagged_lines = _assign_sections_positioned(lines)
+        sections = _sections_dict_from_tagged(tagged_lines)
+    else:
+        tagged_lines = []
+        sections = _split_sections(text)
 
-    raw_skills = {ent.text.strip() for ent in doc.ents if ent.label_ == "SKILL"}
-    skills = _normalize_and_dedupe_skills(raw_skills)
+    ner_skills = {ent.text.strip() for ent in doc.ents if ent.label_ == "SKILL"}
+    section_skills = set(_extract_skills_from_skills_section(sections.get("skills", "")))
+    skills = _normalize_and_dedupe_skills(ner_skills | section_skills)
 
-    organizations = sorted({ent.text.strip() for ent in doc.ents if ent.label_ == "ORG"},
-                            key=str.lower)
+    organizations = _clean_organizations({ent.text.strip() for ent in doc.ents if ent.label_ == "ORG"})
+
+    links = _build_links_output(text, layout, tagged_lines)
 
     result = {
         "name": _guess_name(doc, text),
         "raw_text": text,
         "emails": sorted(set(EMAIL_RE.findall(text))),
         "phones": sorted(set(m.strip() for m in PHONE_RE.findall(text) if len(re.sub(r"\D", "", m)) >= 7)),
-        "links": {
-            "linkedin": _clean_links(LINKEDIN_RE, text),
-            "github": _clean_links(GITHUB_RE, text),
-            "other": [u for u in sorted(set(URL_RE.findall(text)))
-                      if "linkedin.com" not in u and "github.com" not in u],
-        },
+        "links": links,
         "skills": skills,
         "organizations": organizations,
         "years_of_experience": _extract_years_of_experience(nlp, text, sections.get("experience", "")),
@@ -459,32 +885,26 @@ def parse_resume(text: str) -> dict:
     return result
 
 
-def _clean_links(pattern: re.Pattern, text: str):
-    return sorted({m.group(0) for m in pattern.finditer(text)})
-
-
 if __name__ == "__main__":
     sample = """
     Jane Doe
     jane.doe@example.com | +1 (555) 123-4567
-    linkedin.com/in/janedoe | github.com/janedoe
 
     Summary
     Backend engineer with distributed systems experience.
 
-    Skills: Python, Flask, Docker, Kubernetes, machine learning, PostgreSQL
+    Skills: Python, Flask, Docker, Kubernetes, RAG, LangChain, JWT
 
     Experience
     Backend Engineer, Acme Corp
     Jan 2021 - Present
     Built microservices using Python and Kubernetes.
 
-    Software Engineer Intern, StartCo
-    Jun 2019 - Aug 2020
-    Worked on internal tooling.
-
     Education
     B.S. Computer Science, State University
+
+    Achievements
+    1st place at HackWinter 2025
     """
     import pprint
     pprint.pprint(parse_resume(sample))
