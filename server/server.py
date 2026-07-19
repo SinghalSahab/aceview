@@ -11,6 +11,60 @@ from skillExtractor import parse_resume
 app = Flask(__name__)
 CORS(app)
 
+
+def _extract_page_layout(pdf_path):
+    """
+    Extract word-level text layout and hyperlink annotations per page.
+
+    This exists because resume PDFs almost always embed URLs as invisible
+    link annotations behind short visible anchor text (e.g. the word
+    "GitHub" or "Live"), not as literal visible URL text — plain
+    page.get_text() extraction cannot see these links at all, which is why
+    link extraction was previously always empty. page.get_links() is the
+    only way to retrieve them, and word-level bounding boxes are needed
+    alongside them so skillExtractor can figure out (a) which visible word
+    each link sits behind, and (b) which resume section/project the link
+    belongs to, purely from vertical position on the page.
+
+    y-coordinates are offset by a running total of previous pages' heights
+    so positions stay monotonically increasing across a multi-page resume,
+    which is what lets skillExtractor compare positions across pages with
+    simple less-than/greater-than checks.
+    """
+    doc = fitz.open(pdf_path)
+    pages = []
+    y_offset = 0.0
+
+    for page_index, page in enumerate(doc):
+        words = page.get_text("words")  # (x0,y0,x1,y1,word,block_no,line_no,word_no)
+        word_entries = [
+            {
+                "text": w[4],
+                "x0": w[0], "x1": w[2],
+                "y0": w[1] + y_offset, "y1": w[3] + y_offset,
+                "block": w[5], "line": w[6], "word_no": w[7],
+                "page": page_index,
+            }
+            for w in words
+        ]
+
+        link_entries = []
+        for link in page.get_links():
+            if link.get("kind") == fitz.LINK_URI and link.get("uri"):
+                rect = link["from"]
+                link_entries.append({
+                    "uri": link["uri"],
+                    "x0": rect.x0, "x1": rect.x1,
+                    "y0": rect.y0 + y_offset, "y1": rect.y1 + y_offset,
+                })
+
+        pages.append({"words": word_entries, "links": link_entries})
+        y_offset += page.rect.height
+
+    doc.close()
+    return pages
+
+
 @app.route("/api/home", methods=['GET'])
 def return_home():
     return jsonify({
@@ -41,12 +95,16 @@ def upload_file():
         for page in doc:
             text += page.get_text()
             text += "\n"
+        doc.close()
+
+        # Word-level layout + hyperlink annotations (needed for link resolution)
+        layout = _extract_page_layout(file_path)
 
         # Clean up the temp file
         os.remove(file_path)
 
         # Parse using spaCy skillExtractor
-        parsed_details = parse_resume(text)
+        parsed_details = parse_resume(text, layout=layout)
 
         # Print every detail parsed to the console
         print("\n" + "="*30 + " SPACY PARSED RESUME DETAILS " + "="*30)
@@ -68,9 +126,6 @@ def upload_file():
                 "parsed_details": parsed_details
             }), 422
 
-        # "flagged" = parsed, but something looks thin (e.g. no email) —
-        # still returned as a usable profile, with the issues surfaced so
-        # the frontend can show a warning instead of pretending it's perfect.
         response_payload = {
             "message": "File parsed successfully"
                         if validation.get("status") == "ok"
