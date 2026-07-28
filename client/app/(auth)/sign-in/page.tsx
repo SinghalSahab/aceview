@@ -1,9 +1,24 @@
-import React from 'react'
+"use client";
 
-const page = () => {
+import { createClient } from "@/lib/supabase/client";
+
+export default function SignIn() {
+  const supabase = createClient();
+
+  async function signIn() {
+    const { error } = await supabase.auth.signInWithPassword({
+      email: "[EMAIL_ADDRESS]",
+      password: "[PASSWORD]",
+    });
+
+    if (error) {
+      console.error(error);
+    }
+  }
+
   return (
-    <div>page</div>
-  )
+    <button onClick={signIn}>
+      Sign In
+    </button>
+  );
 }
-
-export default page
