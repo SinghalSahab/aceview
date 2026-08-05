@@ -39,6 +39,16 @@ export async function updateSession(request: NextRequest) {
 
     const { pathname } = request.nextUrl;
 
+    // Redirect logged-in users away from /sign-in or /sign-up
+    if (user && (pathname === "/sign-in" || pathname === "/sign-up")) {
+        const homeUrl = request.nextUrl.clone();
+        homeUrl.pathname = "/home";
+        const redirectResponse = NextResponse.redirect(homeUrl);
+        // Copy cookies over to preserve refreshed sessions
+        response.cookies.getAll().forEach((c) => redirectResponse.cookies.set(c));
+        return redirectResponse;
+    }
+
     if (isPublicRoute(pathname)) {
         return response;
     }
@@ -47,7 +57,10 @@ export async function updateSession(request: NextRequest) {
         const signInUrl = request.nextUrl.clone();
         signInUrl.pathname = "/sign-in";
         signInUrl.searchParams.set("redirectedFrom", pathname);
-        return NextResponse.redirect(signInUrl);
+        const redirectResponse = NextResponse.redirect(signInUrl);
+        // Copy cookies over to ensure clearing/updating session cookies persists
+        response.cookies.getAll().forEach((c) => redirectResponse.cookies.set(c));
+        return redirectResponse;
     }
 
     return response;
