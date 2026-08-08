@@ -1,3 +1,5 @@
+from sqlalchemy import text
+from db.db import SessionLocal
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import fitz  # PyMuPDF
@@ -6,7 +8,7 @@ import tempfile
 import pandas as pd
 import numpy as np
 import pprint
-from skillExtractor import parse_resume
+from skills.skillExtractor import parse_resume
 
 app = Flask(__name__)
 CORS(app)
@@ -71,6 +73,22 @@ def return_home():
         'message': "Server is working fine!",
         'status': 'OK'
     })
+@app.get("/health/db")
+def database_health():
+    db = SessionLocal()
+
+    try:
+        result = db.execute(
+            text("SELECT 1")
+        ).scalar()
+
+        return {
+            "database": "connected",
+            "result": result
+        }
+
+    finally:
+        db.close()
 
 @app.route("/api/upload", methods=['POST'])
 def upload_file():
