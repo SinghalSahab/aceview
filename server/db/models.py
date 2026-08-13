@@ -16,6 +16,7 @@ from pgvector.sqlalchemy import Vector
 from .db import Base
 
 
+
 class Profile(Base):
     __tablename__ = "profiles"
 
