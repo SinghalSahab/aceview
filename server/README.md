@@ -1,6 +1,6 @@
-# AceView Python Flask Server 🐍
+# AceView Python FastAPI Server ⚡
 
-This directory contains the Python Flask backend server for AceView, which handles PDF parsing and text extraction.
+This directory contains the Python FastAPI backend server for AceView, which handles PDF parsing and text extraction.
 
 For complete project documentation, overview, and setup guides, please refer to the main [Root README](../README.md).
 
@@ -14,11 +14,14 @@ For complete project documentation, overview, and setup guides, please refer to 
 
 2. **Install dependencies**:
    ```bash
-   pip install Flask flask-cors PyMuPDF
+   pip install -r requirements.txt
    ```
 
 3. **Run the server**:
    ```bash
-   python server.py
+   python app.py
+   # or
+   uvicorn app:app --port 8080 --reload
    ```
-   The backend runs on port 8080 by default.
+   The backend runs on port 8080 by default. Interactive API documentation is available at `http://localhost:8080/docs`.
+

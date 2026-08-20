@@ -1,17 +1,30 @@
-from sqlalchemy import text
-from db.db import SessionLocal
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-import fitz  # PyMuPDF
 import os
 import tempfile
+import pprint
+import fitz  # PyMuPDF
 import pandas as pd
 import numpy as np
-import pprint
+from sqlalchemy import text
+from db.db import SessionLocal
 from skills.skillExtractor import parse_resume
 
-app = Flask(__name__)
-CORS(app)
+from fastapi import FastAPI, File, UploadFile, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+app = FastAPI(
+    title="AceView Server",
+    description="Python FastAPI backend server for AceView handling PDF parsing and text extraction.",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _extract_page_layout(pdf_path):
@@ -67,62 +80,56 @@ def _extract_page_layout(pdf_path):
     return pages
 
 
-@app.route("/api/home", methods=['GET'])
+@app.get("/api/home")
 def return_home():
-    return jsonify({
-        'message': "Server is working fine!",
-        'status': 'OK'
-    })
+    return {
+        "message": "Server is working fine!",
+        "status": "OK"
+    }
+
+
 @app.get("/health/db")
 def database_health():
     db = SessionLocal()
-
     try:
-        result = db.execute(
-            text("SELECT 1")
-        ).scalar()
-
+        result = db.execute(text("SELECT 1")).scalar()
         return {
             "database": "connected",
             "result": result
         }
-
     finally:
         db.close()
 
-@app.route("/api/upload", methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    
-    file = request.files['file']
-    
-    # Check filename
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    if not file.filename:
+        return JSONResponse(status_code=400, content={"error": "No selected file"})
 
     # Save the uploaded PDF temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         file_path = tmp.name
-        file.save(file_path)
+        contents = await file.read()
+        tmp.write(contents)
 
     try:
         # Extract text using PyMuPDF (fitz)
         doc = fitz.open(file_path)
-        text = ""
+        text_content = ""
         for page in doc:
-            text += page.get_text()
-            text += "\n"
+            text_content += page.get_text()
+            text_content += "\n"
         doc.close()
 
         # Word-level layout + hyperlink annotations (needed for link resolution)
         layout = _extract_page_layout(file_path)
 
         # Clean up the temp file
-        os.remove(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
         # Parse using spaCy skillExtractor
-        parsed_details = parse_resume(text, layout=layout)
+        parsed_details = parse_resume(text_content, layout=layout)
 
         # Print every detail parsed to the console
         print("\n" + "="*30 + " SPACY PARSED RESUME DETAILS " + "="*30)
@@ -131,33 +138,35 @@ def upload_file():
 
         validation = parsed_details.get("validation", {})
 
-        # "failed" = no name AND no skills detected — almost certainly a
-        # parsing failure (e.g. scanned/image-only PDF), so reject rather
-        # than silently passing an unusable profile downstream.
+        # "failed" = no name AND no skills detected
         if validation.get("status") == "failed":
-            return jsonify({
-                "error": "Resume parsing failed — no name or skills could be detected. "
-                         "This usually means the PDF is scanned/image-only or has no "
-                         "extractable text. Try a text-based PDF export instead.",
-                "issues": validation.get("issues", []),
-                "text": text,
-                "parsed_details": parsed_details
-            }), 422
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "Resume parsing failed — no name or skills could be detected. "
+                             "This usually means the PDF is scanned/image-only or has no "
+                             "extractable text. Try a text-based PDF export instead.",
+                    "issues": validation.get("issues", []),
+                    "text": text_content,
+                    "parsed_details": parsed_details
+                }
+            )
 
         response_payload = {
             "message": "File parsed successfully"
                         if validation.get("status") == "ok"
                         else "File parsed with warnings",
-            "text": text,
+            "text": text_content,
             "parsed_details": parsed_details
         }
-        return jsonify(response_payload)
+        return response_payload
 
     except Exception as e:
-        # Best-effort cleanup if we failed before os.remove() above
         if os.path.exists(file_path):
             os.remove(file_path)
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8080)
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)

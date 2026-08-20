@@ -16,8 +16,8 @@ aceview/
 │   ├── constants/   # App constants, mock data, and AI schemas
 │   ├── prisma/      # Database schema definitions (MongoDB integration)
 │   └── public/      # Static assets (images, icons, etc.)
-└── server/          # Python Flask backend server
-    └── server.py    # Main server entrypoint (PDF parser & test endpoints)
+└── server/          # Python FastAPI backend server
+    └── app.py           # Main server entrypoint (PDF parser & test endpoints)
 ```
 
 ---
@@ -31,7 +31,7 @@ aceview/
 
 2. **Resume & Preparation Document RAG (PDF Chat)**
    - Drag-and-drop file upload zone supporting PDFs up to 10MB.
-   - Real-time text extraction on the Flask server.
+   - Real-time text extraction on the FastAPI server.
    - Interactive document-guided chat components.
 
 3. **Modern Styling & Premium UI**
@@ -52,7 +52,7 @@ aceview/
 - **File Uploads**: UploadThing & React Dropzone
 
 ### Backend
-- **Framework**: Flask (Python 3) & Flask-CORS
+- **Framework**: FastAPI (Python 3) & Uvicorn
 - **PDF Extraction**: PyMuPDF (`fitz`)
 
 ---
@@ -70,7 +70,7 @@ Follow the steps below to set up and run both client and server applications.
 
 ### 2. Backend Setup (`server/`)
 
-1. Navigate to the server folder:
+1. Open a new terminal and navigate to the server folder:
    ```bash
    cd server
    ```
@@ -89,14 +89,16 @@ Follow the steps below to set up and run both client and server applications.
 
 3. Install required packages:
    ```bash
-   pip install Flask flask-cors PyMuPDF
+   pip install -r requirements.txt
    ```
 
-4. Run the Flask development server:
+4. Run the FastAPI development server:
    ```bash
-   python server.py
+   python app.py
+   # or
+   uvicorn app:app --port 8080 --reload
    ```
-   The backend will start running on **`http://localhost:8080`**.
+   The backend will start running on **`http://localhost:8080`**. Interactive API documentation is available at **`http://localhost:8080/docs`**.
 
 ---
 
