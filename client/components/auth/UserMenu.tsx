@@ -36,7 +36,7 @@ export function UserMenu({ email, avatarUrl }: Props) {
                 aria-label="User menu"
             >
                 {avatarUrl ? (
-                    <Image src={avatarUrl} alt={email} className="h-full w-full object-cover" />
+                    <Image src={avatarUrl} alt={email} fill className="h-full w-full object-cover" />
                 ) : (
                     <UserIcon className="h-5 w-5" />
                 )}
