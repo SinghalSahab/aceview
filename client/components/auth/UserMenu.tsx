@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { LogOut, User as UserIcon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import Image from "next/image";
 
 type Props = { email: string; avatarUrl?: string | null };
 
@@ -35,7 +36,7 @@ export function UserMenu({ email, avatarUrl }: Props) {
                 aria-label="User menu"
             >
                 {avatarUrl ? (
-                    <img src={avatarUrl} alt={email} className="h-full w-full object-cover" />
+                    <Image src={avatarUrl} alt={email} className="h-full w-full object-cover" />
                 ) : (
                     <UserIcon className="h-5 w-5" />
                 )}
