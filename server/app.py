@@ -80,6 +80,50 @@ def _extract_page_layout(pdf_path):
     return pages
 
 
+from urllib.parse import urlparse
+import re
+
+try:
+    from github.githubProfile import build_candidate_github_profile, build_general_profile, build_project_specific_profiles
+except ImportError:
+    try:
+        from githubProfile import build_candidate_github_profile, build_general_profile, build_project_specific_profiles
+    except ImportError:
+        build_candidate_github_profile = None
+
+
+def _extract_github_username_from_parsed(parsed_details: dict) -> str | None:
+    links = parsed_details.get("links", {})
+    github_links = links.get("github", [])
+    for gl in github_links:
+        if not gl:
+            continue
+        url = gl.strip()
+        if not re.match(r"^https?://", url, re.I):
+            url = "https://" + url
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().split(":")[0]
+        if host in ("github.com", "www.github.com"):
+            parts = [p for p in parsed.path.split("/") if p]
+            if parts and parts[0].lower() not in ("topics", "trending", "explore", "settings", "orgs"):
+                return parts[0]
+
+    # Also check project github links
+    for p in links.get("projects", []):
+        gh = p.get("github") if isinstance(p, dict) else None
+        if gh:
+            url = gh.strip()
+            if not re.match(r"^https?://", url, re.I):
+                url = "https://" + url
+            parsed = urlparse(url)
+            host = parsed.netloc.lower().split(":")[0]
+            if host in ("github.com", "www.github.com"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if parts and parts[0].lower() not in ("topics", "trending", "explore", "settings", "orgs"):
+                    return parts[0]
+    return None
+
+
 @app.get("/api/home")
 def return_home():
     return {
@@ -99,6 +143,17 @@ def database_health():
         }
     finally:
         db.close()
+
+
+@app.get("/api/github/analyze/{username}")
+def analyze_github_user(username: str):
+    if not build_candidate_github_profile:
+        return JSONResponse(status_code=500, content={"error": "GitHub profile analysis module not loaded."})
+    try:
+        profile = build_candidate_github_profile(username=username, resume_project_links=[], n=5)
+        return profile
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "username": username})
 
 
 @app.post("/api/upload")
@@ -152,12 +207,35 @@ async def upload_file(file: UploadFile = File(...)):
                 }
             )
 
+        # Automatic GitHub Profile & Code Metrics Discovery
+        github_username = _extract_github_username_from_parsed(parsed_details)
+        project_links = parsed_details.get("links", {}).get("projects", [])
+        github_profile = None
+
+        if github_username and build_candidate_github_profile:
+            try:
+                print(f"[GitHub Pipeline] Analyzing GitHub profile for user: {github_username}")
+                github_profile = build_candidate_github_profile(
+                    username=github_username,
+                    resume_project_links=project_links,
+                    n=3
+                )
+            except Exception as gh_err:
+                print(f"[GitHub Pipeline Warning] {gh_err}")
+                github_profile = {
+                    "username": github_username,
+                    "error": str(gh_err),
+                    "general": {"repos": [], "aggregate_score": None, "failed_repos": []},
+                    "project_specific": {"projects": [], "unresolved_projects": [], "failed_projects": []}
+                }
+
         response_payload = {
             "message": "File parsed successfully"
                         if validation.get("status") == "ok"
                         else "File parsed with warnings",
             "text": text_content,
-            "parsed_details": parsed_details
+            "parsed_details": parsed_details,
+            "github_profile": github_profile,
         }
         return response_payload
 

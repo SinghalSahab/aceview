@@ -16,7 +16,14 @@ type FileWithPreview = File & { preview: string };
 
 interface FileUploadProps {
   className?: string;
-  dataset: (data: { text: string; fileName?: string; fileSize?: number; } | null) => void;
+  dataset: (data: {
+    text: string;
+    fileName?: string;
+    fileSize?: number;
+    parsed_details?: any;
+    github_profile?: any;
+    rawResponse?: any;
+  } | null) => void;
 }
 
 function FileUpload({ className, dataset }: FileUploadProps) {
@@ -81,7 +88,7 @@ function FileUpload({ className, dataset }: FileUploadProps) {
       })
         .then((response) => {
           if (!response.ok) {
-            throw new Error('Failed to upload and parse PDF. Ensure Flask server is running.');
+            throw new Error('Failed to upload and parse PDF. Ensure FastAPI backend is running on port 8080.');
           }
           return response.json();
         })
@@ -91,7 +98,10 @@ function FileUpload({ className, dataset }: FileUploadProps) {
           dataset({
             text: data.text,
             fileName: files[0].name,
-            fileSize: files[0].size
+            fileSize: files[0].size,
+            parsed_details: data.parsed_details,
+            github_profile: data.github_profile,
+            rawResponse: data,
           });
         })
         .catch((error) => {

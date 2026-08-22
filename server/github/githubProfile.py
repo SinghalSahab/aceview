@@ -28,9 +28,20 @@ overall_code_score) from PM Plan Step 1, while also keeping the fuller
 nested breakdown available for the dashboard.
 """
 
-import github_discovery as gd
-import code_retrieval as cr
-import code_metrics as cm
+try:
+    from github import githubDiscovery as gd
+    from github import codeRetrieval as cr
+    from github import codeMetrics as cm
+except ImportError:
+    try:
+        import githubDiscovery as gd
+        import codeRetrieval as cr
+        import codeMetrics as cm
+    except ImportError:
+        import github_discovery as gd
+        import code_retrieval as cr
+        import code_metrics as cm
+
 
 
 def _analyze_one_repo(clone_url: str) -> dict:

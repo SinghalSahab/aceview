@@ -26,8 +26,15 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-import radon.complexity as radon_cc
-import lizard
+try:
+    import radon.complexity as radon_cc
+except ImportError:
+    radon_cc = None
+
+try:
+    import lizard
+except ImportError:
+    lizard = None
 
 # ---------------------------------------------------------------------------
 # 3.3.1 — Architecture score
