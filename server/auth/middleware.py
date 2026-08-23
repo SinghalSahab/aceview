@@ -11,13 +11,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 security = HTTPBearer()
 
-async def get_current_user_id(
+async def require_auth(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)]
 ) -> str:
     token = credentials.credentials
 
     try:
-        # Validate the JWT token against Supabase
         user_response = supabase.auth.get_user(token)
 
         if not user_response or not user_response.user:

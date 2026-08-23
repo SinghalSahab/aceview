@@ -11,6 +11,7 @@ import {
   EyeOff, 
   Trash2 
 } from 'lucide-react';
+import { createClient } from "@/lib/supabase/client";
 
 type FileWithPreview = File & { preview: string };
 
@@ -79,20 +80,32 @@ function FileUpload({ className, dataset }: FileUploadProps) {
       setIsUploading(true);
       setUploadError(null);
 
-      const formData = new FormData();
-      formData.append('file', files[0]);
+      const performUpload = async () => {
+        try {
+          const supabase = createClient();
+          const { data: { session } } = await supabase.auth.getSession();
+          const token = session?.access_token;
 
-      fetch("http://localhost:8080/api/upload", {
-        method: "POST",
-        body: formData,
-      })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Failed to upload and parse PDF. Ensure FastAPI backend is running on port 8080.');
+          const formData = new FormData();
+          formData.append('file', files[0]);
+
+          const headers: HeadersInit = {};
+          if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
           }
-          return response.json();
-        })
-        .then((data) => {
+
+          const response = await fetch("http://localhost:8080/api/upload", {
+            method: "POST",
+            headers,
+            body: formData,
+          });
+
+          if (!response.ok) {
+            const errJson = await response.json().catch(() => null);
+            throw new Error(errJson?.detail || errJson?.error || `Upload failed (Status: ${response.status})`);
+          }
+
+          const data = await response.json();
           setIsUploading(false);
           setParsedText(data.text);
           dataset({
@@ -103,12 +116,14 @@ function FileUpload({ className, dataset }: FileUploadProps) {
             github_profile: data.github_profile,
             rawResponse: data,
           });
-        })
-        .catch((error) => {
+        } catch (error: any) {
           setIsUploading(false);
           setUploadError(error.message || 'Error uploading file');
           console.error('Error uploading file:', error);
-        });
+        }
+      };
+
+      performUpload();
     }
   }, [files, parsedText, isUploading, dataset]);
 

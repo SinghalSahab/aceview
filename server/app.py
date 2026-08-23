@@ -8,9 +8,10 @@ from sqlalchemy import text
 from db.db import SessionLocal
 from skills.skillExtractor import parse_resume
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, status
+from fastapi import FastAPI, File, UploadFile, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from auth.middleware import require_auth
 
 app = FastAPI(
     title="AceView Server",
@@ -146,7 +147,11 @@ def database_health():
 
 
 @app.get("/api/github/analyze/{username}")
-def analyze_github_user(username: str):
+def analyze_github_user(
+    username: str,
+    user_id: str = Depends(require_auth),
+):
+    print(f"[Auth] GitHub analysis requested by user_id: {user_id}")
     if not build_candidate_github_profile:
         return JSONResponse(status_code=500, content={"error": "GitHub profile analysis module not loaded."})
     try:
@@ -157,7 +162,11 @@ def analyze_github_user(username: str):
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    user_id: str = Depends(require_auth),
+):
+    print(f"[Auth] Upload requested by user_id: {user_id}")
     if not file.filename:
         return JSONResponse(status_code=400, content={"error": "No selected file"})
 
