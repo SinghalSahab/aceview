@@ -11,7 +11,7 @@ import {
   EyeOff, 
   Trash2 
 } from 'lucide-react';
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch } from "@/lib/api";
 
 type FileWithPreview = File & { preview: string };
 
@@ -82,21 +82,11 @@ function FileUpload({ className, dataset }: FileUploadProps) {
 
       const performUpload = async () => {
         try {
-          const supabase = createClient();
-          const { data: { session } } = await supabase.auth.getSession();
-          const token = session?.access_token;
-
           const formData = new FormData();
           formData.append('file', files[0]);
 
-          const headers: HeadersInit = {};
-          if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-          }
-
-          const response = await fetch("http://localhost:8080/api/upload", {
+          const response = await apiFetch("/api/upload", {
             method: "POST",
-            headers,
             body: formData,
           });
 

@@ -29,7 +29,7 @@ import {
   Sparkles,
   Terminal
 } from 'lucide-react';
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch } from "@/lib/api";
 
 interface BackendTestDashboardProps {
   data: {
@@ -61,19 +61,7 @@ export default function BackendTestDashboard({ data }: BackendTestDashboardProps
     setGithubError(null);
 
     try {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-
-      const headers: HeadersInit = {};
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
-      const res = await fetch(
-        `http://localhost:8080/api/github/analyze/${encodeURIComponent(manualGithubUser.trim())}`,
-        { headers }
-      );
+      const res = await apiFetch(`/api/github/analyze/${encodeURIComponent(manualGithubUser.trim())}`);
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);
         throw new Error(errJson?.detail || errJson?.error || `Failed to fetch GitHub profile (Status: ${res.status})`);
