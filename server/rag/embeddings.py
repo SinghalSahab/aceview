@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from models import RagDocument  # your SQLAlchemy models module
+from db.models import RagDocument
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 CHARS_PER_TOKEN = 4  # matches chunking.py

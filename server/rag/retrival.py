@@ -22,8 +22,12 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from embeddings import embed_texts
-from models import RagDocument  # your SQLAlchemy models module
+try:
+    from rag.embeddings import embed_texts
+except ImportError:
+    from embeddings import embed_texts
+
+from db.models import RagDocument
 
 SIMILARITY_FLOOR = 0.35
 
