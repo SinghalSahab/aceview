@@ -38,6 +38,7 @@ class Chunk:
     section: str  # section name, repo name, etc.
     text: str
     chunk_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    repo_id: str | None = None  # UUID string, FK to github_repositories.id (readme/code_summary only)
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +47,7 @@ class Chunk:
             "section": self.section,
             "chunk_id": self.chunk_id,
             "text": self.text,
+            "repo_id": self.repo_id,
         }
 
 
@@ -106,7 +108,7 @@ def chunk_resume(candidate_id: str, sections: dict[str, str]) -> list[Chunk]:
     return chunks
 
 
-def chunk_readme(candidate_id: str, repo_name: str, readme_text: str) -> list[Chunk]:
+def chunk_readme(candidate_id: str, repo_name: str, readme_text: str, repo_id: str | None = None) -> list[Chunk]:
     """
     Chunk a GitHub README by markdown heading blocks (## / ### sections),
     ~200-400 tokens each. If a heading block itself exceeds the max, it is
@@ -135,12 +137,13 @@ def chunk_readme(candidate_id: str, repo_name: str, readme_text: str) -> list[Ch
                     source_type="readme",
                     section=f"{repo_name}:{section_label}",
                     text=window,
+                    repo_id=repo_id,
                 )
             )
     return chunks
 
 
-def chunk_code_summary(candidate_id: str, repo_name: str, metrics: dict) -> Chunk:
+def chunk_code_summary(candidate_id: str, repo_name: str, metrics: dict, repo_id: str | None = None) -> Chunk:
     """
     One chunk per repo: a natural-language summary of that repo's metrics.
     `metrics` is the sub-score dict produced in Step 3.3/3.4, e.g.:
@@ -161,7 +164,9 @@ def chunk_code_summary(candidate_id: str, repo_name: str, metrics: dict) -> Chun
         f"Uses {lang_str}."
     )
 
-    return Chunk(candidate_id=candidate_id, source_type="code_summary", section=repo_name, text=summary_text)
+    return Chunk(
+        candidate_id=candidate_id, source_type="code_summary", section=repo_name, text=summary_text, repo_id=repo_id
+    )
 
 
 def build_all_chunks(
@@ -171,15 +176,17 @@ def build_all_chunks(
 ) -> list[dict]:
     """
     Convenience entry point: builds every chunk for a candidate from resume
-    sections + a list of repo dicts (each with 'name', 'readme_text', and
-    the Step 3 metric fields). Returns plain dicts ready for embedding (4.2).
+    sections + a list of repo dicts (each with 'id' (UUID, matches
+    github_repositories.id), 'name', 'readme_text', and the Step 3 metric
+    fields). Returns plain dicts ready for embedding (4.2).
     """
     all_chunks: list[Chunk] = []
     all_chunks.extend(chunk_resume(candidate_id, resume_sections))
 
     for repo in github_repos:
         repo_name = repo.get("name", "unnamed_repo")
-        all_chunks.extend(chunk_readme(candidate_id, repo_name, repo.get("readme_text", "")))
-        all_chunks.append(chunk_code_summary(candidate_id, repo_name, repo))
+        repo_id = repo.get("id")
+        all_chunks.extend(chunk_readme(candidate_id, repo_name, repo.get("readme_text", ""), repo_id=repo_id))
+        all_chunks.append(chunk_code_summary(candidate_id, repo_name, repo, repo_id=repo_id))
 
     return [c.to_dict() for c in all_chunks]
