@@ -1,17 +1,12 @@
 """
 Step 4.2 — Embeddings & storage
 
-Embeds chunks from chunking.py (Step 4.1) with sentence-transformers and
+Embeds chunks from chunking.py with sentence-transformers and
 upserts them into the `rag_documents` table (pgvector, 384-dim, HNSW index)
-from your existing schema.
+from your database schema.
 
-Note on the original plan doc: it suggested Chroma with one collection per
-candidate_id. Since your schema already has rag_documents with a pgvector
-column + a unique (user_id, chunk_id) constraint + HNSW index, we store
-directly there instead — one fewer moving part, and per-candidate isolation
-is handled by filtering on user_id (== candidate_id) at query time (4.3),
-which is exactly what unique_profile_chunk and idx_rag_documents_user_source
-are built for.
+Stores rich JSONB metadata, candidate UUID, repo UUID, source_ref, token count,
+and handles idempotent upserting on the `unique_profile_chunk` constraint.
 
 Model: sentence-transformers/all-MiniLM-L6-v2 (384-dim, local, no API cost —
 matches VECTOR(384) in your schema exactly).
@@ -21,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from functools import lru_cache
+from typing import Any
 
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import select
@@ -36,9 +32,8 @@ CHARS_PER_TOKEN = 4  # matches chunking.py
 @lru_cache(maxsize=1)
 def get_embedding_model() -> SentenceTransformer:
     """
-    Loaded once per process (model load is the expensive part — cache it,
-    don't reconstruct per request). FastAPI: call this once at app startup
-    to warm the cache rather than paying the load cost on the first request.
+    Loaded once per process (model load is cached, not reconstructed per request).
+    FastAPI: call this once at app startup to warm the cache.
     """
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
@@ -52,15 +47,16 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors.tolist()
 
 
-def store_chunks(session: Session, chunks: list[dict]) -> int:
+def store_chunks(session: Session, chunks: list[dict[str, Any]]) -> int:
     """
     Embeds and upserts a list of chunk dicts (as produced by
     chunking.build_all_chunks) into rag_documents.
 
     Upsert key: (user_id, chunk_id) — matches the unique_profile_chunk
-    constraint, so re-running the pipeline for a candidate (e.g. after a
-    resume re-upload) overwrites stale chunks instead of duplicating them.
+    constraint, so re-running the pipeline for a candidate overwrites
+    stale chunks cleanly instead of duplicating them.
 
+    Stores rich JSONB metadata (skills, repo URLs, metric scores, project details).
     Returns the number of rows written.
     """
     if not chunks:
@@ -72,17 +68,27 @@ def store_chunks(session: Session, chunks: list[dict]) -> int:
     rows = []
     for chunk, embedding in zip(chunks, embeddings):
         token_count = max(1, len(chunk["text"]) // CHARS_PER_TOKEN)
+        raw_meta = chunk.get("metadata")
+        metadata: dict[str, Any] = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        metadata.setdefault("section", chunk.get("section", ""))
+
+        repo_id_raw = chunk.get("repo_id")
+        repo_id_uuid = uuid.UUID(str(repo_id_raw)) if repo_id_raw else None
+
+        user_id_raw = chunk["candidate_id"]
+        user_id_uuid = uuid.UUID(str(user_id_raw)) if not isinstance(user_id_raw, uuid.UUID) else user_id_raw
+
         rows.append(
             {
                 "id": uuid.uuid4(),
-                "user_id": chunk["candidate_id"],
+                "user_id": user_id_uuid,
                 "source_type": chunk["source_type"],
                 "chunk_id": chunk["chunk_id"],
                 "content": chunk["text"],
-                "metadata": {"section": chunk["section"]},
+                "metadata": metadata,
                 "embedding": embedding,
-                "source_ref": chunk["section"],
-                "repo_id": chunk.get("repo_id"),
+                "source_ref": chunk.get("section", ""),
+                "repo_id": repo_id_uuid,
                 "token_count": token_count,
             }
         )
@@ -104,15 +110,15 @@ def store_chunks(session: Session, chunks: list[dict]) -> int:
     return len(rows)
 
 
-def clear_candidate_index(session: Session, candidate_id: str) -> int:
+def clear_candidate_index(session: Session, candidate_id: str | uuid.UUID) -> int:
     """
     Deletes all rag_documents rows for a candidate. Useful before a full
     re-index (e.g. resume replaced, GitHub re-scraped) so stale chunks
-    don't linger under different chunk_ids than what build_all_chunks
-    would now generate.
+    don't linger under different chunk_ids.
     """
+    c_uuid = uuid.UUID(str(candidate_id)) if not isinstance(candidate_id, uuid.UUID) else candidate_id
     result = session.execute(
-        select(RagDocument.id).where(RagDocument.user_id == candidate_id)
+        select(RagDocument.id).where(RagDocument.user_id == c_uuid)
     )
     ids = [row[0] for row in result]
     if ids:
