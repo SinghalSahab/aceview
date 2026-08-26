@@ -3,6 +3,8 @@ import tempfile
 from dotenv import load_dotenv
 
 load_dotenv()
+if "HUGGING_FACE_TOKEN" in os.environ:
+    os.environ["HF_TOKEN"] = os.environ["HUGGING_FACE_TOKEN"]
 import pprint
 import fitz  # PyMuPDF
 import pandas as pd

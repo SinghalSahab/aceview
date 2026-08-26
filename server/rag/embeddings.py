@@ -12,11 +12,13 @@ Model: sentence-transformers/all-MiniLM-L6-v2 (384-dim, local, no API cost —
 matches VECTOR(384) in your schema exactly).
 """
 
-from __future__ import annotations
-
+import os
 import uuid
 from functools import lru_cache
 from typing import Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import delete, select
@@ -34,7 +36,17 @@ def get_embedding_model() -> SentenceTransformer:
     """
     Loaded once per process (model load is cached, not reconstructed per request).
     FastAPI: call this once at app startup to warm the cache.
+    Automatically authenticates with Hugging Face Hub using your token.
     """
+    hf_token = os.environ.get("HUGGING_FACE_TOKEN", "").strip()
+
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
+        try:
+            return SentenceTransformer(EMBEDDING_MODEL_NAME, token=hf_token)
+        except TypeError:
+            pass
+
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
 
