@@ -3,6 +3,7 @@ import React from "react";
 import Link from "next/link";
 import { Calendar, Star } from "lucide-react";
 import Image from "next/image";
+import { InterviewDashboard } from "@/components/dashboard/InterviewDashboard";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface Interview {
@@ -449,6 +450,11 @@ const HomePage = () => {
     }} 
   />
 </div>
+        </section>
+
+        {/* ── Candidate Resumes & Mock Interview Launcher ─────────── */}
+        <section style={{ marginBottom: 56 }}>
+          <InterviewDashboard />
         </section>
 
         {/* ── Your Past Interviews ───────────────────────────────────────── */}
