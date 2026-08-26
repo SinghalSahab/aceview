@@ -19,7 +19,7 @@ from functools import lru_cache
 from typing import Any
 
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -118,10 +118,7 @@ def clear_candidate_index(session: Session, candidate_id: str | uuid.UUID) -> in
     """
     c_uuid = uuid.UUID(str(candidate_id)) if not isinstance(candidate_id, uuid.UUID) else candidate_id
     result = session.execute(
-        select(RagDocument.id).where(RagDocument.user_id == c_uuid)
+        delete(RagDocument).where(RagDocument.user_id == c_uuid)
     )
-    ids = [row[0] for row in result]
-    if ids:
-        session.query(RagDocument).filter(RagDocument.id.in_(ids)).delete(synchronize_session=False)
-        session.commit()
-    return len(ids)
+    session.commit()
+    return result.rowcount or 0
