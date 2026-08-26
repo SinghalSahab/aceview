@@ -1,5 +1,8 @@
 import os
 import tempfile
+from dotenv import load_dotenv
+
+load_dotenv()
 import pprint
 import fitz  # PyMuPDF
 import pandas as pd

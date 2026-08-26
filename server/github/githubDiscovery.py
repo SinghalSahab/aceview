@@ -34,16 +34,11 @@ import math
 import requests
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 GITHUB_API_BASE = "https://api.github.com"
-
-# --- AUTH SLOT -------------------------------------------------------------
-# Leave as-is for now. To authenticate later:
-#   export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx     (classic PAT, public_repo scope is enough)
-# or set it in your process environment / .env loader before this module is
-# imported. Nothing else below needs to change.
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-# ----------------------------------------------------------------------------
 
 
 def _headers():
@@ -51,8 +46,9 @@ def _headers():
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
