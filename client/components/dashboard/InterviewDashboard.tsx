@@ -24,37 +24,6 @@ import { ResumePreviewDialog } from "./ResumePreviewDialog";
 import { ResumeItem } from "@/types/dashboard";
 import { apiFetch } from "@/lib/api";
 
-const DEMO_RESUMES: ResumeItem[] = [
-  {
-    id: "demo-resume-1",
-    file_name: "Senior_FullStack_Resume_2025.pdf",
-    target_role: "Full-Stack Engineer",
-    summary: "Senior software engineer with 5+ years specializing in distributed systems, React 19, FastAPI microservices, and PostgreSQL pgvector.",
-    skills: ["React", "TypeScript", "Next.js", "Python", "FastAPI", "PostgreSQL", "Docker", "AWS", "Redis"],
-    ats_score: 92,
-    created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-    github_username: "developer-pro",
-    projects: [
-      {
-        title: "AceView AI Platform",
-        description: "Real-time speech evaluation & RAG candidate grounding system.",
-        skills: ["FastAPI", "pgvector", "Next.js"],
-        url: "https://github.com",
-      },
-    ],
-  },
-  {
-    id: "demo-resume-2",
-    file_name: "Backend_Systems_Architect.pdf",
-    target_role: "Backend Engineer",
-    summary: "High-concurrency backend specialist with expertise in gRPC microservices, event streaming with Kafka, and low-latency database sharding.",
-    skills: ["Python", "Go", "PostgreSQL", "Kafka", "Kubernetes", "gRPC", "Redis", "System Design"],
-    ats_score: 87,
-    created_at: new Date(Date.now() - 86400000 * 7).toISOString(),
-    github_username: "systems-architect",
-  },
-];
-
 export function InterviewDashboard() {
   const [resumes, setResumes] = useState<ResumeItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -68,25 +37,20 @@ export function InterviewDashboard() {
   const [selectedResumeForPreview, setSelectedResumeForPreview] = useState<ResumeItem | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
-  // Fetch resumes from API
+  // Fetch resumes directly from database API
   const fetchResumes = useCallback(async () => {
     setIsLoading(true);
     try {
       const response = await apiFetch("/api/resumes");
       if (response.ok) {
         const data = await response.json();
-        if (data.resumes && data.resumes.length > 0) {
-          setResumes(data.resumes);
-        } else {
-          // If no resumes in DB yet, show demo items so user has instant playground
-          setResumes(DEMO_RESUMES);
-        }
+        setResumes(data.resumes || []);
       } else {
-        setResumes(DEMO_RESUMES);
+        setResumes([]);
       }
     } catch (err) {
-      console.warn("[Dashboard] Could not fetch resumes from server, using initial mock:", err);
-      setResumes(DEMO_RESUMES);
+      console.warn("[Dashboard] Could not fetch resumes from server:", err);
+      setResumes([]);
     } finally {
       setIsLoading(false);
     }
