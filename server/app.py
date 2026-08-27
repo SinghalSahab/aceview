@@ -279,22 +279,57 @@ async def upload_file(
                 db.add(profile)
                 db.commit()
 
-            # 2. Save Resume record
-            detected_summary = parsed_details.get("summary") or (parsed_details.get("sections", {}).get("Summary"))
+            # 2. Save Resume record with extracted summary, experience, education, projects
+            sections_dict = parsed_details.get("sections", {}) or {}
+
+            # Summary
+            detected_summary = (
+                parsed_details.get("summary")
+                or sections_dict.get("summary")
+                or sections_dict.get("objective")
+                or sections_dict.get("profile")
+                or sections_dict.get("about")
+                or (text_content.strip().split("\n\n")[0] if text_content else None)
+            )
+
+            # Experience (JSONB list)
+            exp_data = parsed_details.get("experience") or []
+            if not exp_data:
+                for k in ("experience", "work_experience", "professional_experience", "employment_history"):
+                    if k in sections_dict and sections_dict[k].strip():
+                        exp_data = [{"text": sections_dict[k].strip()}]
+                        break
+
+            # Education (JSONB list)
+            edu_data = parsed_details.get("education") or []
+            if not edu_data:
+                for k in ("education", "academic_background", "academics"):
+                    if k in sections_dict and sections_dict[k].strip():
+                        edu_data = [{"text": sections_dict[k].strip()}]
+                        break
+
+            # Projects (JSONB list)
+            proj_data = parsed_details.get("projects") or []
+            if not proj_data:
+                for k in ("projects", "personal_projects", "academic_projects"):
+                    if k in sections_dict and sections_dict[k].strip():
+                        proj_data = [{"text": sections_dict[k].strip()}]
+                        break
+
             new_resume = Resume(
                 id=uuid.uuid4(),
                 user_id=user_uuid,
                 file_name=file.filename,
                 raw_text=text_content,
                 skills=parsed_details.get("skills", []),
-                experience=parsed_details.get("experience", []),
-                education=parsed_details.get("education", []),
-                projects=parsed_details.get("projects", []),
+                experience=exp_data,
+                education=edu_data,
+                projects=proj_data,
                 years_of_experience=parsed_details.get("years_of_experience"),
                 summary=detected_summary,
                 linkedin_url=(parsed_details.get("links", {}).get("linkedin") or [None])[0],
                 github_username=github_username,
-                sections=parsed_details.get("sections", {}),
+                sections=sections_dict,
                 links=parsed_details.get("links", {}),
             )
             db.add(new_resume)

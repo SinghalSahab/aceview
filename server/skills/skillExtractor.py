@@ -820,35 +820,152 @@ def validate_parsed_resume(result: dict) -> dict:
     return {"status": status, "issues": issues}
 
 
+def _extract_summary(sections: dict, text: str) -> str:
+    for key in ("summary", "objective", "profile", "about", "professional_summary", "executive_summary"):
+        if key in sections and sections[key].strip():
+            return sections[key].strip()
+    return ""
+
+
+def _extract_structured_projects(sections: dict, links: dict, all_skills: list[str]) -> list[dict]:
+    projects_text = (
+        sections.get("projects")
+        or sections.get("personal_projects")
+        or sections.get("academic_projects")
+        or ""
+    ).strip()
+
+    link_projects = {p.get("project"): p for p in links.get("projects", []) if p.get("project")}
+
+    if not projects_text and not link_projects:
+        return []
+
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", projects_text) if b.strip()]
+    if not blocks and projects_text:
+        blocks = [projects_text]
+
+    extracted_projects = []
+    seen_titles = set()
+
+    for block in blocks:
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+        first_line = lines[0]
+        title_candidate = re.sub(r"^[\-\*\u2022\u25CF\u25AA\s]+", "", first_line)
+        title_candidate = re.sub(r"\s*\(?\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{4}).*$", "", title_candidate, flags=re.I).strip()
+        title = title_candidate if len(title_candidate) < 60 else lines[0][:60]
+
+        block_lower = block.lower()
+        proj_techs = [s for s in all_skills if re.search(rf"\b{re.escape(s.lower())}\b", block_lower)]
+
+        matched_link = link_projects.get(title) or link_projects.get(first_line)
+        github_url = matched_link.get("github") if matched_link else None
+        live_url = matched_link.get("live") if matched_link else None
+
+        desc_lines = lines[1:] if len(lines) > 1 else lines
+        desc = "\n".join(desc_lines).strip()
+
+        extracted_projects.append({
+            "title": title,
+            "description": desc,
+            "skills": proj_techs[:8],
+            "technologies": proj_techs[:8],
+            "github": github_url,
+            "live": live_url,
+            "url": live_url or github_url or None,
+        })
+        seen_titles.add(title.lower())
+
+    for p_name, p_data in link_projects.items():
+        if p_name and p_name.lower() not in seen_titles:
+            extracted_projects.append({
+                "title": p_name,
+                "description": "",
+                "skills": [],
+                "technologies": [],
+                "github": p_data.get("github"),
+                "live": p_data.get("live"),
+                "url": p_data.get("live") or p_data.get("github"),
+            })
+
+    return extracted_projects
+
+
+def _extract_structured_experience(sections: dict, organizations: list[str]) -> list[dict]:
+    exp_text = (
+        sections.get("experience")
+        or sections.get("work_experience")
+        or sections.get("professional_experience")
+        or sections.get("employment_history")
+        or ""
+    ).strip()
+
+    if not exp_text:
+        return []
+
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", exp_text) if b.strip()]
+    if not blocks:
+        blocks = [exp_text]
+
+    experiences = []
+    for block in blocks:
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+
+        company = None
+        for org in organizations:
+            if org.lower() in block.lower():
+                company = org
+                break
+
+        title = lines[0]
+        desc = "\n".join(lines[1:]).strip() if len(lines) > 1 else lines[0]
+
+        experiences.append({
+            "role": title,
+            "company": company or title,
+            "description": desc,
+            "raw_text": block,
+        })
+
+    return experiences
+
+
+def _extract_structured_education(sections: dict) -> list[dict]:
+    edu_text = (
+        sections.get("education")
+        or sections.get("academic_background")
+        or sections.get("academics")
+        or ""
+    ).strip()
+
+    if not edu_text:
+        return []
+
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", edu_text) if b.strip()]
+    if not blocks:
+        blocks = [edu_text]
+
+    education_entries = []
+    for block in blocks:
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+        education_entries.append({
+            "degree": lines[0],
+            "institution": lines[1] if len(lines) > 1 else lines[0],
+            "details": "\n".join(lines).strip(),
+            "raw_text": block,
+        })
+    return education_entries
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 def parse_resume(text: str, layout=None) -> dict:
-    """
-    Args:
-      text: raw resume text (e.g. from PyMuPDF get_text()).
-      layout: optional list of per-page dicts built by app.py:
-        [{"words": [{"text","x0","y0","x1","y1","block","line","word_no","page"}, ...],
-          "links": [{"uri","x0","y0","x1","y1"}, ...]}, ...]
-        y-coordinates must already be offset to increase monotonically across
-        pages. When omitted, section splitting falls back to string-only
-        logic and link extraction falls back to regex-over-text (which finds
-        nothing for annotation-based links — see _build_links_output).
-
-    Returns a structured dict:
-    {
-      "name": str, "raw_text": str,
-      "emails": [...], "phones": [...],
-      "links": {"linkedin":[...], "github":[...], "other":[...],
-                "by_section": {...}, "projects": [...]},
-      "skills": [str, ...],           # NER + supplementary patterns + deterministic skills-section parse, deduped/normalized
-      "organizations": [str, ...],    # ORG entities, noise-filtered
-      "years_of_experience": float | None,
-      "sections": {...},              # every detected heading gets its own key
-      "entities": [{"text":str, "label":str}, ...],
-      "validation": {"status": "ok"|"flagged"|"failed", "issues": [...]}
-    }
-    """
     nlp = get_nlp()
     doc = nlp(text)
 
@@ -866,12 +983,20 @@ def parse_resume(text: str, layout=None) -> dict:
     skills = _normalize_and_dedupe_skills(ner_skills | section_skills)
 
     organizations = _clean_organizations({ent.text.strip() for ent in doc.ents if ent.label_ == "ORG"})
-
     links = _build_links_output(text, layout, tagged_lines)
+
+    summary = _extract_summary(sections, text)
+    structured_projects = _extract_structured_projects(sections, links, skills)
+    structured_experience = _extract_structured_experience(sections, organizations)
+    structured_education = _extract_structured_education(sections)
 
     result = {
         "name": _guess_name(doc, text),
         "raw_text": text,
+        "summary": summary,
+        "experience": structured_experience,
+        "education": structured_education,
+        "projects": structured_projects,
         "emails": sorted(set(EMAIL_RE.findall(text))),
         "phones": sorted(set(m.strip() for m in PHONE_RE.findall(text) if len(re.sub(r"\D", "", m)) >= 7)),
         "links": links,
