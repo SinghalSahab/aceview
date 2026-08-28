@@ -266,3 +266,86 @@ def ingest_and_save_resume(
         "parsed_details": parsed_details,
         "github_profile": github_profile,
     }
+
+
+def get_user_resumes(db: Session, user_id: str) -> dict:
+    """Fetches all resumes and associated ATS scores for a specific authenticated user."""
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        return {"error": "Invalid user ID format", "status_code": 400}
+
+    resumes = (
+        db.query(Resume)
+        .filter(Resume.user_id == user_uuid)
+        .order_by(Resume.created_at.desc())
+        .all()
+    )
+
+    resumes_list = []
+    for r in resumes:
+        ats_report = (
+            db.query(AtsReport)
+            .filter(AtsReport.resume_id == r.id)
+            .order_by(AtsReport.created_at.desc())
+            .first()
+        )
+        latest_ats = ats_report.overall_score if ats_report else None
+
+        if latest_ats is not None:
+            ats_score = int(latest_ats)
+        else:
+            skills_count = len(r.skills) if isinstance(r.skills, list) else 0
+            ats_score = min(98, 70 + skills_count * 2) if skills_count > 0 else 80
+
+        target_role = "Software Engineer"
+        if isinstance(r.sections, dict) and r.sections.get("target_role"):
+            target_role = r.sections["target_role"]
+
+        resumes_list.append({
+            "id": str(r.id),
+            "user_id": str(r.user_id),
+            "file_name": r.file_name or "Resume.pdf",
+            "file_path": r.file_path,
+            "target_role": target_role,
+            "summary": r.summary or "",
+            "skills": r.skills if isinstance(r.skills, list) else [],
+            "experience": r.experience if isinstance(r.experience, list) else [],
+            "education": r.education if isinstance(r.education, list) else [],
+            "projects": r.projects if isinstance(r.projects, list) else [],
+            "years_of_experience": float(r.years_of_experience) if r.years_of_experience is not None else None,
+            "ats_score": ats_score,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "github_username": r.github_username,
+            "sections": r.sections if isinstance(r.sections, dict) else {},
+            "raw_text": r.raw_text or "",
+        })
+
+    return {"resumes": resumes_list}
+
+
+def delete_user_resume(db: Session, user_id: str, resume_id: str) -> dict:
+    """Deletes a resume and any associated ATS records for a specific authenticated user."""
+    try:
+        resume_uuid = uuid.UUID(resume_id)
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        return {"error": "Invalid UUID format", "status_code": 400}
+
+    resume = (
+        db.query(Resume)
+        .filter(Resume.id == resume_uuid, Resume.user_id == user_uuid)
+        .first()
+    )
+    if not resume:
+        return {"error": "Resume not found", "status_code": 404}
+
+    try:
+        db.query(AtsReport).filter(AtsReport.resume_id == resume_uuid).delete()
+        db.delete(resume)
+        db.commit()
+        return {"status": "ok", "message": "Resume deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e), "status_code": 500}
+
