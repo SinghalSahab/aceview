@@ -62,6 +62,9 @@ def _analyze_one_repo(clone_url: str) -> dict:
         cr.cleanup_clone(retrieval["clone_dir"])
 
     sub = metrics["sub_scores"]
+    readme_info = metrics.get("breakdown", {}).get("documentation", {}).get("readme", {})
+    readme_text = readme_info.get("readme_text") or ""
+
     return {
         "architecture_score": sub["architecture"],
         "testing_score": sub["testing"],
@@ -69,6 +72,7 @@ def _analyze_one_repo(clone_url: str) -> dict:
         "documentation_score": sub["documentation"],
         "commit_score": sub["commit_history"],
         "overall_code_score": metrics["overall_code_score"],
+        "readme_text": readme_text,
         "sub_scores": sub,
         "breakdown": metrics["breakdown"],
         "files_analyzed": retrieval["total_files_selected"],
@@ -99,11 +103,20 @@ def build_general_profile(username: str, n: int = 5) -> dict:
         except Exception as e:
             failed.append({"name": repo["name"], "error": str(e)})
             continue
+
+        primary_lang = repo.get("language")
+        languages_dict = {"primary": primary_lang} if primary_lang else {}
+
         analyzed.append({
             "name": repo["name"],
-            "full_name": repo["full_name"],
-            "relevance_score": repo["_relevance_score"],
-            "relevance_breakdown": repo["_relevance_breakdown"],
+            "full_name": repo.get("full_name", repo["name"]),
+            "github_repo_id": repo.get("id"),
+            "description": repo.get("description"),
+            "url": repo.get("html_url") or repo.get("clone_url"),
+            "is_fork": repo.get("fork", False),
+            "languages": languages_dict,
+            "relevance_score": repo.get("_relevance_score"),
+            "relevance_breakdown": repo.get("_relevance_breakdown"),
             **analysis,
         })
 
@@ -146,9 +159,19 @@ def build_project_specific_profiles(resume_project_links: list) -> dict:
         except Exception as e:
             failed.append({"project_name": item["project_name"], "error": str(e)})
             continue
+
+        primary_lang = repo.get("language")
+        languages_dict = {"primary": primary_lang} if primary_lang else {}
+
         analyzed.append({
             "project_name": item["project_name"],
-            "repo_full_name": repo["full_name"],
+            "name": repo.get("name", item["project_name"]),
+            "full_name": repo.get("full_name", repo.get("name")),
+            "github_repo_id": repo.get("id"),
+            "description": repo.get("description"),
+            "url": repo.get("html_url") or repo.get("clone_url"),
+            "is_fork": repo.get("fork", False),
+            "languages": languages_dict,
             **analysis,
         })
 
@@ -157,6 +180,7 @@ def build_project_specific_profiles(resume_project_links: list) -> dict:
         "unresolved_projects": unresolved,   # no parseable GitHub link on the resume
         "failed_projects": failed,           # had a link, but clone/analysis failed
     }
+
 
 
 try:

@@ -284,7 +284,9 @@ def _score_readme_completeness(readme_path: str) -> dict:
         "has_description": has_description,
         "has_setup_instructions": has_setup,
         "has_usage_examples": has_usage,
+        "readme_text": content,
     }
+
 
 
 def compute_documentation_score(files: list, clone_dir: str) -> dict:

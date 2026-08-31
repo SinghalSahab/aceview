@@ -238,6 +238,8 @@ def ingest_and_save_resume(
                 .first()
             )
             if existing_repo:
+                existing_repo.github_repo_id = r.get("github_repo_id") or existing_repo.github_repo_id
+                existing_repo.is_fork = r.get("is_fork", False)
                 existing_repo.url = r.get("url") or existing_repo.url
                 existing_repo.description = r.get("description") or existing_repo.description
                 existing_repo.languages = r.get("languages", {}) or existing_repo.languages
@@ -255,6 +257,8 @@ def ingest_and_save_resume(
                     id=repo_id,
                     user_id=user_uuid,
                     repo_name=repo_name,
+                    github_repo_id=r.get("github_repo_id"),
+                    is_fork=r.get("is_fork", False),
                     url=r.get("url"),
                     description=r.get("description"),
                     languages=r.get("languages", {}),
@@ -269,6 +273,7 @@ def ingest_and_save_resume(
                 db.add(gh_repo)
                 stored_repos.append({**r, "id": str(repo_id)})
         db.commit()
+
 
     # 4d. Save Overall GitHub Profile Summary
     if github_profile and github_profile.get("profile_summary"):
