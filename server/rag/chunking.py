@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SourceType = Literal["resume", "skills", "project", "readme", "code_summary", "transcript"]
+SourceType = Literal["resume", "skills", "project", "readme", "code_summary", "github_profile_summary", "transcript"]
 
 # Rough token estimate: ~4 chars/token (good enough for chunk sizing, no
 # tokenizer dependency needed at this stage).
@@ -422,6 +422,33 @@ def chunk_code_summary(
     )
 
 
+def chunk_github_profile_summary(
+    candidate_id: str,
+    username: str,
+    summary_text: str,
+    score_data: dict[str, Any] | None = None,
+) -> Chunk:
+    """
+    Creates a dedicated RAG chunk for the candidate's overall GitHub profile analytics & habits.
+    """
+    meta: dict[str, Any] = {
+        "username": username,
+        "source_type": "github_profile_summary",
+    }
+    if score_data:
+        meta["overall_score"] = score_data.get("overall_score")
+        meta["sub_scores"] = score_data.get("sub_scores", {})
+        meta["signals"] = score_data.get("signals", {})
+
+    return Chunk(
+        candidate_id=candidate_id,
+        source_type="github_profile_summary",
+        section="github_profile_summary",
+        text=summary_text,
+        metadata=meta,
+    )
+
+
 def build_all_chunks(
     candidate_id: str,
     resume_sections: dict[str, str] | None = None,
@@ -430,11 +457,13 @@ def build_all_chunks(
     resume_projects: list[dict[str, Any]] | list[str] | None = None,
     resume_links: dict[str, Any] | list[dict[str, Any]] | None = None,
     years_of_experience: float | int | None = None,
+    github_profile_summary: dict[str, Any] | str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Convenience entry point: builds every chunk for a candidate from:
       - resume sections + structured skills + structured projects + links
       - list of repo dicts (with 'id', 'name', 'readme_text', and metric fields)
+      - overall GitHub profile analytics summary (github_profile_summary)
     Returns plain dicts ready for embedding & storage in rag_documents.
     """
     all_chunks: list[Chunk] = []
@@ -489,6 +518,27 @@ def build_all_chunks(
                     metrics=repo,
                     repo_id=repo_id,
                     repo_metadata=repo_metadata,
+                )
+            )
+
+    # 3. Overall GitHub Profile Summary chunking
+    if github_profile_summary:
+        if isinstance(github_profile_summary, dict):
+            summary_text = github_profile_summary.get("rag_summary") or github_profile_summary.get("rag_summary_text") or ""
+            username = github_profile_summary.get("username", "candidate")
+            score_data = github_profile_summary.get("score_data")
+        else:
+            summary_text = str(github_profile_summary)
+            username = "candidate"
+            score_data = None
+
+        if summary_text.strip():
+            all_chunks.append(
+                chunk_github_profile_summary(
+                    candidate_id=candidate_id,
+                    username=username,
+                    summary_text=summary_text,
+                    score_data=score_data,
                 )
             )
 

@@ -43,6 +43,7 @@ class Profile(Base):
 
     # Relationships
     github_repositories: Mapped[List['GithubRepository']] = relationship('GithubRepository', back_populates='user', cascade='all, delete-orphan')
+    github_profile_summaries: Mapped[List['GithubProfileSummary']] = relationship('GithubProfileSummary', back_populates='user', cascade='all, delete-orphan')
     resumes: Mapped[List['Resume']] = relationship('Resume', back_populates='user', cascade='all, delete-orphan')
     ats_reports: Mapped[List['AtsReport']] = relationship('AtsReport', back_populates='user', cascade='all, delete-orphan')
     interview_sessions: Mapped[List['InterviewSession']] = relationship('InterviewSession', back_populates='user', cascade='all, delete-orphan')
@@ -97,6 +98,40 @@ class GithubRepository(Base):
     user: Mapped['Profile'] = relationship('Profile', back_populates='github_repositories')
     rag_documents: Mapped[List['RagDocument']] = relationship('RagDocument', back_populates='repo')
     interview_questions: Mapped[List['InterviewQuestion']] = relationship('InterviewQuestion', back_populates='source_repo')
+
+
+class GithubProfileSummary(Base):
+    __tablename__ = 'github_profile_summaries'
+    __table_args__ = (
+        ForeignKeyConstraint(['user_id'], ['public.profiles.id'], ondelete='CASCADE', name='github_profile_summaries_user_id_fkey'),
+        PrimaryKeyConstraint('id', name='github_profile_summaries_pkey'),
+        Index('idx_github_profile_summaries_user_id', 'user_id'),
+        {'schema': 'public'},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, server_default=text('gen_random_uuid()'))
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    overall_score: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2))
+    volume_score: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2))
+    consistency_score: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2))
+    collaboration_score: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2))
+    impact_score: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2))
+    language_score: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2))
+    annual_contributions: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    longest_streak_days: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    active_days_ratio: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 4))
+    total_pull_requests: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    total_code_reviews: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    total_stars_received: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    total_forks_received: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    primary_languages: Mapped[Optional[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    metrics_breakdown: Mapped[Optional[Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    rag_summary_text: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+
+    user: Mapped['Profile'] = relationship('Profile', back_populates='github_profile_summaries')
 
 
 class Resume(Base):

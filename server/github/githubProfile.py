@@ -159,28 +159,48 @@ def build_project_specific_profiles(resume_project_links: list) -> dict:
     }
 
 
+try:
+    from github.githubProfileMetrics import analyze_full_github_profile
+except ImportError:
+    try:
+        from githubProfileMetrics import analyze_full_github_profile
+    except ImportError:
+        analyze_full_github_profile = None
+
+
 # ---------------------------------------------------------------------------
 # Full Step 3 pipeline entry point
 # ---------------------------------------------------------------------------
 def build_candidate_github_profile(username: str, resume_project_links: list, n: int = 5) -> dict:
     """
     Shape matches the Candidate Profile schema's `github` field (PM Plan
-    Step 1), extended with the general/project_specific split:
+    Step 1), extended with the general/project_specific split and overall
+    profile scoring summary:
 
     {
       "username": str,
       "general": {"repos": [...], "aggregate_score": float, "failed_repos": [...]},
-      "project_specific": {"projects": [...], "unresolved_projects": [...], "failed_projects": [...]}
+      "project_specific": {"projects": [...], "unresolved_projects": [...], "failed_projects": [...]},
+      "profile_summary": {"score_data": {...}, "rag_summary": str, "raw_metrics": {...}}
     }
     """
     general = build_general_profile(username, n=n)
     project_specific = build_project_specific_profiles(resume_project_links)
 
+    profile_summary = None
+    if analyze_full_github_profile:
+        try:
+            profile_summary = analyze_full_github_profile(username)
+        except Exception as e:
+            print(f"[GitHub Profile Metrics Warning] {e}")
+
     return {
         "username": username,
         "general": general,
         "project_specific": project_specific,
+        "profile_summary": profile_summary,
     }
+
 
 
 def handle_analyze_github_user(username: str, user_id: str):

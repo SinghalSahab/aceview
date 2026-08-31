@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 import fitz  # PyMuPDF
 from sqlalchemy.orm import Session
 
-from db.models import Profile, Resume, GithubRepository, AtsReport
+from db.models import Profile, Resume, GithubRepository, AtsReport, GithubProfileSummary
 from skills.skillExtractor import parse_resume
 
 try:
@@ -270,7 +270,63 @@ def ingest_and_save_resume(
                 stored_repos.append({**r, "id": str(repo_id)})
         db.commit()
 
-    # 4d. Generate & Save ATS Report
+    # 4d. Save Overall GitHub Profile Summary
+    if github_profile and github_profile.get("profile_summary"):
+        summary_info = github_profile["profile_summary"]
+        score_data = summary_info.get("score_data", {})
+        sub_scores = score_data.get("sub_scores", {})
+        signals = score_data.get("signals", {})
+        rag_text = summary_info.get("rag_summary", "")
+
+        existing_summary = (
+            db.query(GithubProfileSummary)
+            .filter(GithubProfileSummary.user_id == user_uuid)
+            .first()
+        )
+        if existing_summary:
+            existing_summary.username = github_username or "candidate"
+            existing_summary.overall_score = score_data.get("overall_score")
+            existing_summary.volume_score = sub_scores.get("volume_and_frequency")
+            existing_summary.consistency_score = sub_scores.get("consistency_and_cadence")
+            existing_summary.collaboration_score = sub_scores.get("collaboration_and_prs")
+            existing_summary.impact_score = sub_scores.get("community_impact")
+            existing_summary.language_score = sub_scores.get("language_breadth")
+            existing_summary.annual_contributions = signals.get("annual_contributions", 0)
+            existing_summary.longest_streak_days = signals.get("longest_streak_days", 0)
+            existing_summary.active_days_ratio = signals.get("active_days_ratio", 0.0)
+            existing_summary.total_pull_requests = signals.get("total_pull_requests", 0)
+            existing_summary.total_code_reviews = signals.get("total_code_reviews", 0)
+            existing_summary.total_stars_received = signals.get("total_stars_received", 0)
+            existing_summary.total_forks_received = signals.get("total_forks_received", 0)
+            existing_summary.primary_languages = signals.get("primary_languages", [])
+            existing_summary.metrics_breakdown = score_data
+            existing_summary.rag_summary_text = rag_text
+        else:
+            new_summary = GithubProfileSummary(
+                id=uuid.uuid4(),
+                user_id=user_uuid,
+                username=github_username or "candidate",
+                overall_score=score_data.get("overall_score"),
+                volume_score=sub_scores.get("volume_and_frequency"),
+                consistency_score=sub_scores.get("consistency_and_cadence"),
+                collaboration_score=sub_scores.get("collaboration_and_prs"),
+                impact_score=sub_scores.get("community_impact"),
+                language_score=sub_scores.get("language_breadth"),
+                annual_contributions=signals.get("annual_contributions", 0),
+                longest_streak_days=signals.get("longest_streak_days", 0),
+                active_days_ratio=signals.get("active_days_ratio", 0.0),
+                total_pull_requests=signals.get("total_pull_requests", 0),
+                total_code_reviews=signals.get("total_code_reviews", 0),
+                total_stars_received=signals.get("total_stars_received", 0),
+                total_forks_received=signals.get("total_forks_received", 0),
+                primary_languages=signals.get("primary_languages", []),
+                metrics_breakdown=score_data,
+                rag_summary_text=rag_text,
+            )
+            db.add(new_summary)
+        db.commit()
+
+    # 4e. Generate & Save ATS Report
     skills_count = len(parsed_details.get("skills", []))
     ats_score = min(98, 70 + skills_count * 2) if skills_count > 0 else 65
     ats_report = AtsReport(
@@ -290,6 +346,7 @@ def ingest_and_save_resume(
     # 5. Ingest into RAG pgvector table (rag_documents)
     if build_all_chunks and store_chunks:
         try:
+            profile_summary_obj = github_profile.get("profile_summary") if github_profile else None
             chunks = build_all_chunks(
                 candidate_id=str(user_uuid),
                 resume_sections=parsed_details.get("sections", {}),
@@ -298,6 +355,7 @@ def ingest_and_save_resume(
                 resume_links=links,
                 years_of_experience=parsed_details.get("years_of_experience"),
                 github_repos=stored_repos,
+                github_profile_summary=profile_summary_obj,
             )
             stored_count = store_chunks(db, chunks)
             print(f"[RAG Database Ingestion] Successfully upserted {stored_count} chunks to rag_documents for user {user_uuid}.")
@@ -312,6 +370,7 @@ def ingest_and_save_resume(
         "parsed_details": parsed_details,
         "github_profile": github_profile,
     }
+
 
 
 def get_user_resumes(db: Session, user_id: str) -> dict:
