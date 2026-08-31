@@ -166,17 +166,34 @@ def ingest_and_save_resume(
             }
 
     # 4. Database Persistence
-    # 4a. Ensure Profile exists
+    # 4a. Ensure Profile exists and is populated/updated
     profile = db.query(Profile).filter(Profile.id == user_uuid).first()
+    candidate_name = parsed_details.get("name")
+    extracted_email = (parsed_details.get("emails") or [None])[0]
+    extracted_phone = (parsed_details.get("phones") or [None])[0]
+
     if not profile:
         profile = Profile(
             id=user_uuid,
-            name=parsed_details.get("name") or "Candidate",
-            email=(parsed_details.get("emails") or [None])[0],
-            phone=(parsed_details.get("phones") or [None])[0],
+            name=candidate_name or "Candidate",
+            email=extracted_email,
+            phone=extracted_phone,
         )
         db.add(profile)
         db.commit()
+    else:
+        updated = False
+        if (not profile.name or profile.name == "Candidate") and candidate_name:
+            profile.name = candidate_name
+            updated = True
+        if not profile.email and extracted_email:
+            profile.email = extracted_email
+            updated = True
+        if not profile.phone and extracted_phone:
+            profile.phone = extracted_phone
+            updated = True
+        if updated:
+            db.commit()
 
     # 4b. Save Resume record (1:1 direct field mapping from parsed_details)
     new_resume = Resume(
@@ -199,29 +216,58 @@ def ingest_and_save_resume(
     db.commit()
     db.refresh(new_resume)
 
-    # 4c. Save Discovered GitHub Repositories
+    # 4c. Save Discovered GitHub Repositories (general top repos + project repos)
     stored_repos = []
     if github_profile:
+        all_gh_repos = []
         general_repos = github_profile.get("general", {}).get("repos", [])
+        project_repos = github_profile.get("project_specific", {}).get("projects", [])
+
         for r in general_repos:
-            repo_id = uuid.uuid4()
-            gh_repo = GithubRepository(
-                id=repo_id,
-                user_id=user_uuid,
-                repo_name=r.get("name", "repo"),
-                url=r.get("url"),
-                description=r.get("description"),
-                languages=r.get("languages", {}),
-                architecture_score=r.get("architecture_score"),
-                testing_score=r.get("testing_score"),
-                complexity_score=r.get("complexity_score"),
-                documentation_score=r.get("documentation_score"),
-                commit_score=r.get("commit_score"),
-                overall_code_score=r.get("overall_code_score"),
-                readme_text=r.get("readme_text"),
+            all_gh_repos.append(r)
+
+        for pr in project_repos:
+            if not any(x.get("name") == pr.get("name") or x.get("url") == pr.get("url") for x in all_gh_repos):
+                all_gh_repos.append(pr)
+
+        for r in all_gh_repos:
+            repo_name = r.get("name") or "repo"
+            existing_repo = (
+                db.query(GithubRepository)
+                .filter(GithubRepository.user_id == user_uuid, GithubRepository.repo_name == repo_name)
+                .first()
             )
-            db.add(gh_repo)
-            stored_repos.append({**r, "id": str(repo_id)})
+            if existing_repo:
+                existing_repo.url = r.get("url") or existing_repo.url
+                existing_repo.description = r.get("description") or existing_repo.description
+                existing_repo.languages = r.get("languages", {}) or existing_repo.languages
+                existing_repo.architecture_score = r.get("architecture_score")
+                existing_repo.testing_score = r.get("testing_score")
+                existing_repo.complexity_score = r.get("complexity_score")
+                existing_repo.documentation_score = r.get("documentation_score")
+                existing_repo.commit_score = r.get("commit_score")
+                existing_repo.overall_code_score = r.get("overall_code_score")
+                existing_repo.readme_text = r.get("readme_text")
+                stored_repos.append({**r, "id": str(existing_repo.id)})
+            else:
+                repo_id = uuid.uuid4()
+                gh_repo = GithubRepository(
+                    id=repo_id,
+                    user_id=user_uuid,
+                    repo_name=repo_name,
+                    url=r.get("url"),
+                    description=r.get("description"),
+                    languages=r.get("languages", {}),
+                    architecture_score=r.get("architecture_score"),
+                    testing_score=r.get("testing_score"),
+                    complexity_score=r.get("complexity_score"),
+                    documentation_score=r.get("documentation_score"),
+                    commit_score=r.get("commit_score"),
+                    overall_code_score=r.get("overall_code_score"),
+                    readme_text=r.get("readme_text"),
+                )
+                db.add(gh_repo)
+                stored_repos.append({**r, "id": str(repo_id)})
         db.commit()
 
     # 4d. Generate & Save ATS Report
@@ -348,4 +394,74 @@ def delete_user_resume(db: Session, user_id: str, resume_id: str) -> dict:
     except Exception as e:
         db.rollback()
         return {"error": str(e), "status_code": 500}
+
+
+async def handle_resume_upload(file, user_id: str):
+    """Abstract controller function for resume uploads."""
+    from fastapi.responses import JSONResponse
+    import tempfile
+    from db.db import SessionLocal
+
+    print(f"[Auth] Resume upload requested by user_id: {user_id}")
+    if not file or not file.filename:
+        return JSONResponse(status_code=400, content={"error": "No selected file"})
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        file_path = tmp.name
+        contents = await file.read()
+        tmp.write(contents)
+
+    db = SessionLocal()
+    try:
+        result = ingest_and_save_resume(
+            db=db,
+            user_id=user_id,
+            file_name=file.filename,
+            file_path=file_path,
+        )
+        if result.get("status") == "failed":
+            return JSONResponse(status_code=422, content=result)
+        return result
+    except Exception as e:
+        db.rollback()
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        db.close()
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+def handle_get_resumes(user_id: str):
+    """Abstract controller function for fetching user resumes."""
+    from fastapi.responses import JSONResponse
+    from db.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        result = get_user_resumes(db=db, user_id=user_id)
+        status_code = result.pop("status_code", 200) if "status_code" in result else 200
+        if status_code != 200:
+            return JSONResponse(status_code=status_code, content=result)
+        return result
+    finally:
+        db.close()
+
+
+def handle_delete_resume(user_id: str, resume_id: str | None):
+    """Abstract controller function for deleting user resumes."""
+    from fastapi.responses import JSONResponse
+    from db.db import SessionLocal
+
+    if not resume_id:
+        return JSONResponse(status_code=400, content={"error": "Missing resume id parameter"})
+    db = SessionLocal()
+    try:
+        result = delete_user_resume(db=db, user_id=user_id, resume_id=resume_id)
+        status_code = result.pop("status_code", 200) if "status_code" in result else 200
+        if status_code != 200:
+            return JSONResponse(status_code=status_code, content=result)
+        return result
+    finally:
+        db.close()
+
 

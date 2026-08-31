@@ -183,6 +183,19 @@ def build_candidate_github_profile(username: str, resume_project_links: list, n:
     }
 
 
+def handle_analyze_github_user(username: str, user_id: str):
+    """Abstract controller function for analyzing candidate GitHub profile."""
+    from fastapi.responses import JSONResponse
+
+    print(f"[Auth] GitHub analysis requested by user_id: {user_id}")
+    try:
+        profile = build_candidate_github_profile(username=username, resume_project_links=[], n=5)
+        return profile
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "username": username})
+
+
+
 if __name__ == "__main__":
     import json
     # Live smoke test against a real account with a small number of real

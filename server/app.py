@@ -1,5 +1,4 @@
 import os
-import tempfile
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -9,25 +8,17 @@ if "HUGGING_FACE_TOKEN" in os.environ:
 
 from fastapi import FastAPI, File, UploadFile, Depends, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from db.db import SessionLocal
 from auth.middleware import require_auth
 from skills.resumeService import (
-    ingest_and_save_resume,
-    get_user_resumes,
-    delete_user_resume,
+    handle_resume_upload,
+    handle_get_resumes,
+    handle_delete_resume,
 )
-from skills.interviewService import create_interview_session
-
-try:
-    from github.githubProfile import build_candidate_github_profile
-except ImportError:
-    try:
-        from githubProfile import build_candidate_github_profile
-    except ImportError:
-        build_candidate_github_profile = None
+from skills.interviewService import handle_create_interview_session
+from github.githubProfile import handle_analyze_github_user
 
 app = FastAPI(
     title="AceView Server",
@@ -70,27 +61,12 @@ def analyze_github_user(
     username: str,
     user_id: str = Depends(require_auth),
 ):
-    print(f"[Auth] GitHub analysis requested by user_id: {user_id}")
-    if not build_candidate_github_profile:
-        return JSONResponse(status_code=500, content={"error": "GitHub profile analysis module not loaded."})
-    try:
-        profile = build_candidate_github_profile(username=username, resume_project_links=[], n=5)
-        return profile
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e), "username": username})
+    return handle_analyze_github_user(username=username, user_id=user_id)
 
 
 @app.get("/api/resumes")
 def fetch_resumes(user_id: str = Depends(require_auth)):
-    db = SessionLocal()
-    try:
-        result = get_user_resumes(db=db, user_id=user_id)
-        status_code = result.pop("status_code", 200) if "status_code" in result else 200
-        if status_code != 200:
-            return JSONResponse(status_code=status_code, content=result)
-        return result
-    finally:
-        db.close()
+    return handle_get_resumes(user_id=user_id)
 
 
 @app.delete("/api/resumes")
@@ -98,17 +74,7 @@ def delete_resume_by_query(
     id: Optional[str] = Query(None),
     user_id: str = Depends(require_auth),
 ):
-    if not id:
-        return JSONResponse(status_code=400, content={"error": "Missing resume id parameter"})
-    db = SessionLocal()
-    try:
-        result = delete_user_resume(db=db, user_id=user_id, resume_id=id)
-        status_code = result.pop("status_code", 200) if "status_code" in result else 200
-        if status_code != 200:
-            return JSONResponse(status_code=status_code, content=result)
-        return result
-    finally:
-        db.close()
+    return handle_delete_resume(user_id=user_id, resume_id=id)
 
 
 @app.delete("/api/resumes/{resume_id}")
@@ -116,15 +82,7 @@ def delete_resume_by_path(
     resume_id: str,
     user_id: str = Depends(require_auth),
 ):
-    db = SessionLocal()
-    try:
-        result = delete_user_resume(db=db, user_id=user_id, resume_id=resume_id)
-        status_code = result.pop("status_code", 200) if "status_code" in result else 200
-        if status_code != 200:
-            return JSONResponse(status_code=status_code, content=result)
-        return result
-    finally:
-        db.close()
+    return handle_delete_resume(user_id=user_id, resume_id=resume_id)
 
 
 @app.post("/api/interviews/session")
@@ -132,51 +90,15 @@ def start_interview_session(
     payload: dict = Body(...),
     user_id: str = Depends(require_auth),
 ):
-    db = SessionLocal()
-    try:
-        result = create_interview_session(db=db, user_id=user_id, payload=payload)
-        status_code = result.pop("status_code", 200) if "status_code" in result else 200
-        if status_code != 200:
-            return JSONResponse(status_code=status_code, content=result)
-        return result
-    finally:
-        db.close()
+    return handle_create_interview_session(user_id=user_id, payload=payload)
 
 
 @app.post("/api/upload")
-async def upload_file(
+async def upload_resume(
     file: UploadFile = File(...),
     user_id: str = Depends(require_auth),
 ):
-    print(f"[Auth] Resume upload requested by user_id: {user_id}")
-    if not file.filename:
-        return JSONResponse(status_code=400, content={"error": "No selected file"})
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        file_path = tmp.name
-        contents = await file.read()
-        tmp.write(contents)
-
-    db = SessionLocal()
-    try:
-        result = ingest_and_save_resume(
-            db=db,
-            user_id=user_id,
-            file_name=file.filename,
-            file_path=file_path,
-        )
-
-        if result.get("status") == "failed":
-            return JSONResponse(status_code=422, content=result)
-
-        return result
-    except Exception as e:
-        db.rollback()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    finally:
-        db.close()
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    return await handle_resume_upload(file=file, user_id=user_id)
 
 
 if __name__ == "__main__":

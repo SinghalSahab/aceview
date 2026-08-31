@@ -49,3 +49,20 @@ def create_interview_session(db: Session, user_id: str, payload: dict[str, Any])
     except Exception as e:
         db.rollback()
         return {"error": str(e), "status_code": 500}
+
+
+def handle_create_interview_session(user_id: str, payload: dict[str, Any]):
+    """Abstract controller function for creating an interview session."""
+    from fastapi.responses import JSONResponse
+    from db.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        result = create_interview_session(db=db, user_id=user_id, payload=payload)
+        status_code = result.pop("status_code", 200) if "status_code" in result else 200
+        if status_code != 200:
+            return JSONResponse(status_code=status_code, content=result)
+        return result
+    finally:
+        db.close()
+
