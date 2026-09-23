@@ -111,7 +111,7 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]] | list[Any]) -> 
             }
         )
 
-    stmt = pg_insert(RagDocument).values(rows)
+    stmt = pg_insert(RagDocument.__table__).values(rows)
     stmt = stmt.on_conflict_do_update(
         constraint="unique_profile_chunk",
         set_={
