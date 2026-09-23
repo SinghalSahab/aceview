@@ -313,6 +313,27 @@ class TestTask6TranscriptChunking(unittest.TestCase):
         self.assertEqual(t1.chunk_id, t2.chunk_id)
         self.assertEqual(t2.metadata["evaluation_score"], 92)
 
+    def test_store_chunks_accepts_transcript_chunk_and_preserves_upsert(self):
+        from unittest.mock import MagicMock
+        from rag.chunking import chunk_transcript
+        from rag.embeddings import store_chunks
+
+        mock_session = MagicMock()
+        t = chunk_transcript(
+            question="What is GraphQL?",
+            answer="A query language for APIs using FastAPI.",
+            candidate_id=TEST_CANDIDATE_ID,
+            turn_number=2,
+            question_topic="api_design",
+            evaluation_score=85,
+        )
+
+        # store_chunks accepts [t] directly (Chunk dataclass instance) without throwing TypeError
+        count = store_chunks(mock_session, [t])
+        self.assertEqual(count, 1)
+        self.assertTrue(mock_session.execute.called)
+        self.assertTrue(mock_session.commit.called)
+
 
 if __name__ == "__main__":
     unittest.main()

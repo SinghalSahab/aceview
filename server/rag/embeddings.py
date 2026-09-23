@@ -62,10 +62,10 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors.tolist()
 
 
-def store_chunks(session: Session, chunks: list[dict[str, Any]]) -> int:
+def store_chunks(session: Session, chunks: list[dict[str, Any]] | list[Any]) -> int:
     """
-    Embeds and upserts a list of chunk dicts (as produced by
-    chunking.build_all_chunks) into rag_documents.
+    Embeds and upserts a list of chunk dicts or Chunk dataclass instances
+    (as produced by chunking.build_all_chunks or chunk_transcript) into rag_documents.
 
     Upsert key: (user_id, chunk_id) — matches the unique_profile_chunk
     constraint, so re-running the pipeline for a candidate overwrites
@@ -77,11 +77,14 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]]) -> int:
     if not chunks:
         return 0
 
-    texts = [c["text"] for c in chunks]
+    norm_chunks: list[dict[str, Any]] = [
+        c.to_dict() if hasattr(c, "to_dict") else c for c in chunks
+    ]
+    texts = [c["text"] for c in norm_chunks]
     embeddings = embed_texts(texts)
 
     rows = []
-    for chunk, embedding in zip(chunks, embeddings):
+    for chunk, embedding in zip(norm_chunks, embeddings):
         token_count = max(1, count_tokens(chunk["text"]))
         raw_meta = chunk.get("metadata")
         metadata: dict[str, Any] = dict(raw_meta) if isinstance(raw_meta, dict) else {}
