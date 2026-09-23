@@ -361,6 +361,7 @@ def ingest_and_save_resume(
                 years_of_experience=parsed_details.get("years_of_experience"),
                 github_repos=stored_repos,
                 github_profile_summary=profile_summary_obj,
+                resume_text=text_content,
             )
             stored_count = store_chunks(db, chunks)
             print(f"[RAG Database Ingestion] Successfully upserted {stored_count} chunks to rag_documents for user {user_uuid}.")

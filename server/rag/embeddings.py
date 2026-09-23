@@ -26,9 +26,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import RagDocument
+try:
+    from rag.chunking import count_tokens
+except ImportError:
+    from chunking import count_tokens
 
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-CHARS_PER_TOKEN = 4  # matches chunking.py
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 
 @lru_cache(maxsize=1)
@@ -79,7 +82,7 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]]) -> int:
 
     rows = []
     for chunk, embedding in zip(chunks, embeddings):
-        token_count = max(1, len(chunk["text"]) // CHARS_PER_TOKEN)
+        token_count = max(1, count_tokens(chunk["text"]))
         raw_meta = chunk.get("metadata")
         metadata: dict[str, Any] = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         metadata.setdefault("section", chunk.get("section", ""))
