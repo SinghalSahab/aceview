@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,13 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]] | list[Any]) -> 
     constraint, so re-running the pipeline for a candidate overwrites
     stale chunks cleanly instead of duplicating them.
 
+    Tombstoning (Task 8):
+    For each (candidate_id, source_type) present in the incoming batch,
+    diffs the new batch's chunk_ids against what's currently stored with
+    deleted_at IS NULL. Any stored chunk_id not present in the new batch is
+    soft-deleted (deleted_at = func.now()). Re-ingested chunks have deleted_at
+    reset to NULL.
+
     Stores rich JSONB metadata (skills, repo URLs, metric scores, project details).
     Returns the number of rows written.
     """
@@ -80,6 +87,38 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]] | list[Any]) -> 
     norm_chunks: list[dict[str, Any]] = [
         c.to_dict() if hasattr(c, "to_dict") else c for c in chunks
     ]
+
+    # 1. Diff and tombstone stale chunks for each (candidate_id, source_type) pair
+    from collections import defaultdict
+    incoming_by_pair: dict[tuple[uuid.UUID, str], set[str]] = defaultdict(set)
+    for chunk in norm_chunks:
+        user_id_raw = chunk["candidate_id"]
+        u_uuid = uuid.UUID(str(user_id_raw)) if not isinstance(user_id_raw, uuid.UUID) else user_id_raw
+        st = chunk["source_type"]
+        cid = chunk["chunk_id"]
+        incoming_by_pair[(u_uuid, st)].add(cid)
+
+    for (cand_uuid, st), new_ids in incoming_by_pair.items():
+        existing_stmt = select(RagDocument.chunk_id).where(
+            RagDocument.user_id == cand_uuid,
+            RagDocument.source_type == st,
+            RagDocument.deleted_at.is_(None),
+        )
+        stored_ids = set(session.scalars(existing_stmt).all())
+        stale_ids = stored_ids - new_ids
+        if stale_ids:
+            tombstone_stmt = (
+                update(RagDocument)
+                .where(
+                    RagDocument.user_id == cand_uuid,
+                    RagDocument.source_type == st,
+                    RagDocument.chunk_id.in_(list(stale_ids)),
+                )
+                .values(deleted_at=func.now())
+            )
+            session.execute(tombstone_stmt)
+
+    # 2. Embed and upsert incoming batch
     texts = [c["text"] for c in norm_chunks]
     embeddings = embed_texts(texts)
 
@@ -103,11 +142,12 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]] | list[Any]) -> 
                 "source_type": chunk["source_type"],
                 "chunk_id": chunk["chunk_id"],
                 "content": chunk["text"],
-                "metadata": metadata,
+                "metadata_": metadata,
                 "embedding": embedding,
                 "source_ref": chunk.get("section", ""),
                 "repo_id": repo_id_uuid,
                 "token_count": token_count,
+                "deleted_at": None,
             }
         )
 
@@ -116,11 +156,12 @@ def store_chunks(session: Session, chunks: list[dict[str, Any]] | list[Any]) -> 
         constraint="unique_profile_chunk",
         set_={
             "content": stmt.excluded.content,
-            "metadata": stmt.excluded.metadata,
+            "metadata_": stmt.excluded.metadata_,
             "embedding": stmt.excluded.embedding,
             "source_ref": stmt.excluded.source_ref,
             "repo_id": stmt.excluded.repo_id,
             "token_count": stmt.excluded.token_count,
+            "deleted_at": None,
         },
     )
     session.execute(stmt)

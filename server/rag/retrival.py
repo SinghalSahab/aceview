@@ -67,6 +67,7 @@ def retrieve(
     stmt = (
         select(RagDocument, similarity_expr)
         .where(RagDocument.user_id == c_uuid)
+        .where(RagDocument.deleted_at.is_(None))
         .where(distance_expr <= (1 - min_similarity))  # push the floor into the index scan
         .order_by(distance_expr)
         .limit(k)

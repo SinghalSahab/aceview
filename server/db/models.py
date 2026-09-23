@@ -232,6 +232,7 @@ class RagDocument(Base):
         Index('idx_rag_documents_repo_id', 'repo_id', postgresql_where='(repo_id IS NOT NULL)'),
         Index('idx_rag_documents_user_source', 'user_id', 'source_type'),
         Index('rag_documents_embedding_idx', 'embedding', postgresql_ops={'embedding': 'vector_cosine_ops'}, postgresql_using='hnsw'),
+        Index('idx_rag_documents_deleted_at', 'deleted_at'),
         {'schema': 'public'},
     )
 
@@ -241,11 +242,12 @@ class RagDocument(Base):
     chunk_id: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
-    metadata_: Mapped[Optional[Any]] = mapped_column('metadata', JSONB, server_default=text("'{}'::jsonb"))
+    metadata_: Mapped[Optional[Any]] = mapped_column('metadata_', JSONB, server_default=text("'{}'::jsonb"))
     embedding: Mapped[Optional[Any]] = mapped_column(VECTOR(384))
     source_ref: Mapped[Optional[str]] = mapped_column(Text)
     repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
     token_count: Mapped[Optional[int]] = mapped_column(Integer)
+    deleted_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), nullable=True)
 
     repo: Mapped[Optional['GithubRepository']] = relationship('GithubRepository', back_populates='rag_documents')
     user: Mapped['Profile'] = relationship('Profile', back_populates='rag_documents')
