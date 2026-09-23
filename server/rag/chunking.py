@@ -173,14 +173,68 @@ def _split_into_token_windows(text: str, max_tokens: int, overlap_tokens: int) -
     return [w for w in windows if w]
 
 
+SKILL_TAXONOMY: dict[str, set[str]] = {
+    "language": {
+        "python", "javascript", "typescript", "java", "c", "c++", "c#", "go", "golang",
+        "rust", "ruby", "php", "swift", "kotlin", "scala", "dart", "r", "julia",
+        "html", "html5", "css", "css3", "sass", "scss", "sql", "bash", "shell", "powershell",
+        "lua", "perl", "elixir", "clojure", "haskell", "solidity", "matlab"
+    },
+    "backend": {
+        "fastapi", "django", "flask", "express", "express.js", "node.js", "nodejs",
+        "nestjs", "spring", "spring boot", "ruby on rails", "rails", "laravel", "gin",
+        "grpc", "rest", "restful", "rest api", "graphql", "celery", "redis", "postgresql",
+        "postgres", "mysql", "mongodb", "sqlite", "mariadb", "cassandra", "dynamodb",
+        "couchdb", "neo4j", "rabbitmq", "kafka", "elasticsearch", "websockets", "microservices"
+    },
+    "frontend": {
+        "react", "react.js", "reactjs", "vue", "vue.js", "vuejs", "angular", "angularjs",
+        "svelte", "sveltekit", "next.js", "nextjs", "nuxt", "nuxtjs", "tailwind", "tailwindcss",
+        "bootstrap", "material ui", "mui", "redux", "mobx", "zustand", "webpack", "vite",
+        "jquery", "webgl", "three.js"
+    },
+    "infra": {
+        "docker", "kubernetes", "k8s", "aws", "amazon web services", "gcp", "google cloud",
+        "azure", "terraform", "ansible", "jenkins", "github actions", "gitlab ci", "ci/cd",
+        "linux", "unix", "ubuntu", "nginx", "apache", "helm", "prometheus", "grafana",
+        "cloudformation", "serverless", "datadog", "devops"
+    },
+    "data": {
+        "pandas", "numpy", "scipy", "scikit-learn", "sklearn", "tensorflow", "pytorch",
+        "keras", "spark", "apache spark", "hadoop", "airflow", "dbt", "databricks",
+        "bigquery", "snowflake", "redshift", "tableau", "power bi", "machine learning",
+        "deep learning", "nlp", "computer vision", "llm", "langchain", "huggingface"
+    },
+    "tools": {
+        "git", "github", "gitlab", "bitbucket", "jira", "confluence", "postman",
+        "insomnia", "pytest", "unittest", "jest", "mocha", "cypress", "selenium",
+        "figma", "visual studio code", "vscode", "vim", "docker compose"
+    }
+}
+
+
+def classify_skill_category(skill_name: str) -> str:
+    """Classifies a skill into language, backend, frontend, infra, data, or tools."""
+    s = skill_name.strip().lower()
+    for cat, items in SKILL_TAXONOMY.items():
+        if s in items:
+            return cat
+    for cat, items in SKILL_TAXONOMY.items():
+        for item in items:
+            if item in s or s in item:
+                return cat
+    return "tools"
+
+
 def chunk_skills(
     candidate_id: str,
     skills: list[str] | list[dict[str, Any]] | set[str] | None = None,
 ) -> list[Chunk]:
     """
     Creates dedicated, structured skill chunks from candidate's skills array (resumes.skills).
-    Groups skills into readable clusters so they can be easily retrieved
-    by semantic questions (e.g. 'what backend skills does the candidate have?').
+    Clusters skills strictly by category (language / backend / frontend / infra / data / tools)
+    so no single skill chunk mixes multiple categories.
+    Adds metadata["skill_category"].
     """
     if not skills:
         return []
@@ -198,27 +252,39 @@ def chunk_skills(
     # Deduplicate while preserving original order
     deduped = list(dict.fromkeys(cleaned_skills))
 
+    # Group skills strictly by category
+    from collections import defaultdict
+    category_groups: dict[str, list[str]] = defaultdict(list)
+    for s in deduped:
+        cat = classify_skill_category(s)
+        category_groups[cat].append(s)
+
     chunks: list[Chunk] = []
-    chunk_size = 20  # group ~20 skills per chunk for dense semantic coverage
-    for i in range(0, len(deduped), chunk_size):
-        batch = deduped[i : i + chunk_size]
-        skills_text = (
-            f"Candidate Technical Skills ({i + 1}-{i + len(batch)} of {len(deduped)}): "
-            + ", ".join(batch)
-        )
-        chunks.append(
-            Chunk(
+    for cat, cat_skills in category_groups.items():
+        chunk_size = 15
+        for i in range(0, len(cat_skills), chunk_size):
+            batch = cat_skills[i : i + chunk_size]
+            skills_text = (
+                f"Candidate Technical Skills ({cat.title()}): "
+                + ", ".join(batch)
+            )
+            part_suffix = f"-{i // chunk_size + 1}" if len(cat_skills) > chunk_size else ""
+            c = Chunk(
                 candidate_id=candidate_id,
                 source_type="skills",
-                section="skills",
+                section=f"skills:{cat}",
+                chunk_id=f"{candidate_id}-skills-{cat}{part_suffix}",
                 text=skills_text,
                 metadata={
-                    "section": "skills",
+                    "section": f"skills:{cat}",
+                    "skill_category": cat,
                     "skills": batch,
+                    "category_skills_count": len(cat_skills),
                     "all_skills_count": len(deduped),
                 },
             )
-        )
+            chunks.append(c)
+
     for c in chunks:
         c.metadata["detected_tech"] = extract_tech_entities(c.text)
         assert_within_model_limit(c.text, c.chunk_id)
@@ -315,6 +381,49 @@ def chunk_projects(
     return chunks
 
 
+def _split_into_logical_entries(section_name: str, section_text: str) -> list[str]:
+    """
+    Splits a resume section into discrete logical entries (e.g. one job, one degree,
+    one summary paragraph) before windowing.
+    """
+    cleaned = section_text.strip()
+    if not cleaned:
+        return []
+
+    # 1. Try splitting by double newlines first (standard paragraph separation)
+    blocks = [b.strip() for b in re.split(r"\n\s*\n+", cleaned) if b.strip()]
+    if len(blocks) > 1:
+        return blocks
+
+    # 2. If no blank lines, check if it's Experience or Education and split on date boundaries or company/role headers
+    s_name_lower = section_name.lower()
+    if any(k in s_name_lower for k in ["experience", "work", "employment", "education"]):
+        lines = cleaned.split("\n")
+        entry_blocks: list[list[str]] = []
+        current_block: list[str] = []
+
+        date_header_re = re.compile(
+            r"(?:\((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\.?\s*\d{4}\s*[-–—to]\s*(?:present|current|now|\d{4})\)|\b(?:19|20)\d{2}\s*[-–—]\s*(?:present|current|now|(?:19|20)\d{2})\b)",
+            re.I,
+        )
+
+        for line in lines:
+            is_bullet = line.strip().startswith(("-", "*", "•", "–"))
+            if not is_bullet and date_header_re.search(line) and current_block:
+                entry_blocks.append(current_block)
+                current_block = [line]
+            else:
+                current_block.append(line)
+
+        if current_block:
+            entry_blocks.append(current_block)
+
+        if len(entry_blocks) > 1:
+            return ["\n".join(b).strip() for b in entry_blocks if "\n".join(b).strip()]
+
+    return blocks if blocks else [cleaned]
+
+
 def chunk_resume(
     candidate_id: str,
     sections: dict[str, str],
@@ -324,11 +433,12 @@ def chunk_resume(
     years_of_experience: float | int | None = None,
 ) -> list[Chunk]:
     """
-    sections: output of Step 2's section splitter, e.g.
+    sections: output of section splitter, e.g.
       {"Summary": "...", "Experience": "...", "Education": "...", ...}
 
-    Each section becomes 1+ chunks, ~150-300 tokens each, with a 20-token
-    overlap only when a section exceeds the max.
+    Chunk per logical entry (one job, one degree, one summary paragraph) first;
+    only applies _split_into_token_windows() within an entry if that entry alone
+    exceeds ~250 tokens, ensuring no chunk mixes multiple jobs or degrees.
     Also produces dedicated chunks for skills and projects if provided.
     """
     chunks: list[Chunk] = []
@@ -351,28 +461,117 @@ def chunk_resume(
             if section_name.lower() in ("skills", "technical skills") and skills:
                 continue
 
-            windows = _split_into_token_windows(
-                section_text, max_tokens=RESUME_MAX_TOKENS, overlap_tokens=RESUME_OVERLAP_TOKENS
-            )
-            for window in windows:
-                meta: dict[str, Any] = {"section": section_name}
-                if years_of_experience is not None:
-                    meta["years_of_experience"] = float(years_of_experience)
-
-                chunks.append(
-                    Chunk(
-                        candidate_id=candidate_id,
-                        source_type="resume",
-                        section=section_name,
-                        text=window,
-                        metadata=meta,
+            # Chunk per logical entry (one job, one degree, one summary paragraph) first
+            entries = _split_into_logical_entries(section_name, section_text)
+            for entry_idx, entry in enumerate(entries):
+                entry_tokens = count_tokens(entry)
+                # Only apply _split_into_token_windows() within an entry if that entry alone exceeds ~250 tokens
+                if entry_tokens > 250:
+                    windows = _split_into_token_windows(
+                        entry, max_tokens=250, overlap_tokens=RESUME_OVERLAP_TOKENS
                     )
-                )
+                else:
+                    windows = [entry]
+
+                for window_idx, window in enumerate(windows):
+                    meta: dict[str, Any] = {
+                        "section": section_name,
+                        "entry_index": entry_idx + 1,
+                    }
+                    if years_of_experience is not None:
+                        meta["years_of_experience"] = float(years_of_experience)
+
+                    chunks.append(
+                        Chunk(
+                            candidate_id=candidate_id,
+                            source_type="resume",
+                            section=section_name,
+                            chunk_id=f"{candidate_id}-resume-{normalize_project_key(section_name)}-{entry_idx + 1}-{window_idx + 1}",
+                            text=window,
+                            metadata=meta,
+                        )
+                    )
+
     for c in chunks:
         if "detected_tech" not in c.metadata:
             c.metadata["detected_tech"] = extract_tech_entities(c.text)
         assert_within_model_limit(c.text, c.chunk_id)
     return chunks
+
+
+def _clean_readme_markdown(text: str) -> str:
+    """
+    Strips badge/shield markdown, table-of-contents blocks, and license boilerplate
+    before chunking.
+    """
+    if not text:
+        return ""
+
+    lines = text.split("\n")
+    cleaned_lines: list[str] = []
+    in_toc_block = False
+    in_license_section = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Check for markdown heading changes
+        heading_match = re.match(r"^#{1,4}\s+(.+)$", stripped)
+        if heading_match:
+            heading_title = heading_match.group(1).strip().lower()
+            if "table of contents" in heading_title or heading_title in ("toc", "contents"):
+                in_toc_block = True
+                continue
+            elif "license" in heading_title:
+                in_license_section = True
+                continue
+            else:
+                in_toc_block = False
+                in_license_section = False
+
+        if in_toc_block:
+            if re.match(r"^\s*[-*+]\s+\[.*?\]\(#.*?\)\s*$", stripped) or not stripped:
+                continue
+            else:
+                in_toc_block = False
+
+        if in_license_section:
+            if heading_match:
+                in_license_section = False
+            else:
+                continue
+
+        # Skip TOC HTML comment markers
+        if "<!-- toc -->" in stripped.lower() or "<!-- /toc -->" in stripped.lower():
+            continue
+
+        # Skip standalone TOC bullet links: - [Title](#anchor)
+        if re.match(r"^\s*[-*+]\s+\[.*?\]\(#.*?\)\s*$", stripped):
+            continue
+
+        # Skip badge / shield images and markdown links:
+        # e.g., [![Build](...)] or [![Badge](...)](...)
+        if re.match(r"^\[\!\[.*?\]\(.*?\)\](?:\(.*?\))?$", stripped):
+            continue
+        if re.match(r"^\!\[.*?\]\(.*?(?:shields\.io|badge|coveralls|workflows|circleci|codecov).*?\)$", stripped):
+            continue
+
+        # Strip inline badges if the entire line consists of badges
+        no_badges = re.sub(r"\[\!\[.*?\]\(.*?\)\](?:\(.*?\))?", "", stripped)
+        no_badges = re.sub(r"\!\[.*?\]\(.*?(?:shields\.io|badge|coveralls|workflows|circleci|codecov).*?\)", "", no_badges).strip()
+        if stripped and not no_badges:
+            continue
+
+        # Skip license boilerplate lines
+        if re.search(r"\b(mit|apache\s*2\.0|gnu|gpl|bsd)\s+license\b", stripped, re.I) and ("copyright" in stripped.lower() or "licensed" in stripped.lower() or len(stripped) < 80):
+            continue
+        if re.match(r"^copyright\s+(?:\(c\)\s*)?\d{4}.*?$", stripped, re.I):
+            continue
+
+        cleaned_lines.append(line)
+
+    result = "\n".join(cleaned_lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", result)
 
 
 def chunk_readme(
@@ -384,51 +583,80 @@ def chunk_readme(
 ) -> list[Chunk]:
     """
     Chunk a GitHub README by markdown heading blocks (## / ### sections),
-    ~200-400 tokens each. If a heading block itself exceeds the max, it is
-    further split. Attaches enriched repo metadata (URL, description, languages).
+    ~200-400 tokens each.
+    Strips badge/shield markdown, table-of-contents blocks, and license boilerplate.
+    If no ##/### headings exist, falls back to _split_into_token_windows().
     """
     if not readme_text or not readme_text.strip():
         return []
 
-    # Split on lines starting with ## or ### (keep the heading with its block)
-    heading_pattern = re.compile(r"(?=^#{2,3}\s.+$)", re.MULTILINE)
-    blocks = [b for b in heading_pattern.split(readme_text) if b.strip()]
-
-    if not blocks:
-        blocks = [readme_text]
+    cleaned_text = _clean_readme_markdown(readme_text)
+    if not cleaned_text.strip():
+        return []
 
     chunks: list[Chunk] = []
-    for block in blocks:
-        heading_match = re.match(r"^#{2,3}\s+(.+)$", block.strip(), re.MULTILINE)
-        section_label = heading_match.group(1).strip() if heading_match else "intro"
 
-        windows = _split_into_token_windows(block, max_tokens=README_MAX_TOKENS, overlap_tokens=0)
-        for window in windows:
+    # Check for ## or ### headings
+    heading_pattern = re.compile(r"(?=^#{2,3}\s.+$)", re.MULTILINE)
+    blocks = [b for b in heading_pattern.split(cleaned_text) if b.strip()]
+    has_headings = bool(re.search(r"^#{2,3}\s+", cleaned_text, re.MULTILINE))
+
+    if not has_headings or not blocks:
+        # Fallback path calling _split_into_token_windows() when a README has no ##/### headings at all
+        windows = _split_into_token_windows(cleaned_text, max_tokens=100, overlap_tokens=20)
+        for idx, window in enumerate(windows):
             meta: dict[str, Any] = {
-                "section": f"{repo_name}:{section_label}",
+                "section": f"{repo_name}:section-{idx + 1}",
                 "repo_name": repo_name,
                 "project_key": normalize_project_key(repo_name),
             }
             if repo_metadata:
-                if "url" in repo_metadata and repo_metadata["url"]:
-                    meta["url"] = repo_metadata["url"]
-                if "description" in repo_metadata and repo_metadata["description"]:
-                    meta["description"] = repo_metadata["description"]
-                if "languages" in repo_metadata and repo_metadata["languages"]:
-                    meta["languages"] = repo_metadata["languages"]
-                if "is_fork" in repo_metadata:
-                    meta["is_fork"] = repo_metadata["is_fork"]
+                for k in ("url", "description", "languages", "is_fork"):
+                    if k in repo_metadata and repo_metadata[k] is not None:
+                        meta[k] = repo_metadata[k]
 
             chunks.append(
                 Chunk(
                     candidate_id=candidate_id,
                     source_type="readme",
-                    section=f"{repo_name}:{section_label}",
+                    section=f"{repo_name}:section-{idx + 1}",
+                    chunk_id=f"{repo_id or normalize_project_key(repo_name)}-readme-{idx + 1}",
                     text=window,
                     repo_id=repo_id,
                     metadata=meta,
                 )
             )
+    else:
+        # Standard path by ## / ### heading blocks
+        for block_idx, block in enumerate(blocks):
+            heading_match = re.match(r"^#{2,3}\s+(.+)$", block.strip(), re.MULTILINE)
+            section_label = heading_match.group(1).strip() if heading_match else f"intro-{block_idx + 1}"
+
+            windows = _split_into_token_windows(block, max_tokens=README_MAX_TOKENS, overlap_tokens=0)
+            for w_idx, window in enumerate(windows):
+                meta: dict[str, Any] = {
+                    "section": f"{repo_name}:{section_label}",
+                    "repo_name": repo_name,
+                    "project_key": normalize_project_key(repo_name),
+                }
+                if repo_metadata:
+                    for k in ("url", "description", "languages", "is_fork"):
+                        if k in repo_metadata and repo_metadata[k] is not None:
+                            meta[k] = repo_metadata[k]
+
+                chunk_suffix = f"-{w_idx + 1}" if len(windows) > 1 else ""
+                chunks.append(
+                    Chunk(
+                        candidate_id=candidate_id,
+                        source_type="readme",
+                        section=f"{repo_name}:{section_label}",
+                        chunk_id=f"{repo_id or normalize_project_key(repo_name)}-readme-{normalize_project_key(section_label)}{chunk_suffix}",
+                        text=window,
+                        repo_id=repo_id,
+                        metadata=meta,
+                    )
+                )
+
     for c in chunks:
         c.metadata["detected_tech"] = extract_tech_entities(c.text)
         assert_within_model_limit(c.text, c.chunk_id)

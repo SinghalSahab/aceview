@@ -102,7 +102,16 @@ MIT License. Copyright 2026.
         "url": "https://github.com/testuser/headingless-tool",
         "description": "A headingless utility tool for data conversion and batch processing.",
         "languages": {"Python": 12000},
-        "readme_text": "A lightweight utility tool for data transformation. It provides simple CLI utilities for batch data processing. This utility reads raw CSV and JSON files and converts them into normalized database tables with schema validation. It is written in Python and uses SQLite for local caching. It has no section headers anywhere in the file.",
+        "readme_text": (
+            "A lightweight utility tool for data transformation and batch processing. "
+            "It provides simple CLI utilities for batch data processing, normalization, and stream validation. "
+            "This utility reads raw CSV and JSON files and converts them into normalized database tables with schema validation. "
+            "It is written in Python and uses SQLite for local caching. It has no section headers anywhere in the file.\n\n"
+            "The pipeline architecture ingests streaming data sources, cleanses anomalies, and serializes payloads into standard columnar formats. "
+            "Each batch worker processes transactions asynchronously using multiprocessing pools and in-memory ring buffers with zero external dependencies.\n\n"
+            "Configuration is handled entirely through environment variables or JSON configuration profiles loaded on startup. "
+            "The daemon monitors input directories for new records, applies transformation rules, and exports structured results to PostgreSQL or AWS S3 buckets."
+        ),
         "overall_code_score": 75.0,
         "architecture_score": 70.0,
         "testing_score": 72.0,

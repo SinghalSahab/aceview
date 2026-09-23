@@ -335,5 +335,107 @@ class TestTask6TranscriptChunking(unittest.TestCase):
         self.assertTrue(mock_session.commit.called)
 
 
+class TestTask7ChunkLevelCleanup(unittest.TestCase):
+    def test_skills_category_clustering_isolation(self):
+        from rag.chunking import chunk_skills, classify_skill_category
+
+        chunks = chunk_skills(TEST_CANDIDATE_ID, TEST_RESUME_SKILLS)
+        self.assertGreater(len(chunks), 0)
+
+        observed_categories = set()
+        for c in chunks:
+            cat = c.metadata.get("skill_category")
+            self.assertIsNotNone(cat)
+            self.assertIn(cat, {"language", "backend", "frontend", "infra", "data", "tools"})
+            observed_categories.add(cat)
+
+            # Acceptance criteria: No skills chunk mixes more than one category
+            for skill in c.metadata["skills"]:
+                self.assertEqual(
+                    classify_skill_category(skill),
+                    cat,
+                    f"Skill '{skill}' does not belong to chunk category '{cat}'",
+                )
+
+        # Confirm multiple distinct categories were extracted from the fixture
+        self.assertTrue(len(observed_categories) >= 3)
+
+    def test_resume_chunk_per_logical_entry_isolation(self):
+        from rag.chunking import chunk_resume
+
+        chunks = chunk_resume(
+            candidate_id=TEST_CANDIDATE_ID,
+            sections=TEST_RESUME_SECTIONS,
+            skills=None,
+            projects=None,
+        )
+
+        exp_chunks = [c for c in chunks if c.section == "Experience"]
+        self.assertGreaterEqual(len(exp_chunks), 2)
+
+        # Acceptance criteria: No resume chunk contains text from two different job/education entries
+        techcorp_found = False
+        startuplabs_found = False
+        for c in exp_chunks:
+            has_techcorp = "techcorp" in c.text.lower()
+            has_startuplabs = "startuplabs" in c.text.lower()
+
+            if has_techcorp:
+                techcorp_found = True
+                self.assertFalse(
+                    has_startuplabs,
+                    "Resume chunk contains text from both TechCorp and StartupLabs entries!",
+                )
+            if has_startuplabs:
+                startuplabs_found = True
+                self.assertFalse(
+                    has_techcorp,
+                    "Resume chunk contains text from both StartupLabs and TechCorp entries!",
+                )
+
+        self.assertTrue(techcorp_found)
+        self.assertTrue(startuplabs_found)
+
+    def test_headingless_readme_produces_multiple_chunks(self):
+        from rag.chunking import chunk_readme
+
+        headingless_repo = next(r for r in TEST_GITHUB_REPOS if r["name"] == "headingless-tool")
+        chunks = chunk_readme(
+            candidate_id=TEST_CANDIDATE_ID,
+            repo_name=headingless_repo["name"],
+            readme_text=headingless_repo["readme_text"],
+            repo_id=headingless_repo["id"],
+        )
+
+        # Acceptance criteria: A heading-less README fixture still produces multiple reasonably-sized chunks
+        self.assertGreaterEqual(
+            len(chunks),
+            2,
+            f"Expected headingless README to produce multiple chunks, got {len(chunks)}",
+        )
+        for c in chunks:
+            self.assertLessEqual(count_tokens(c.text), 150)
+
+    def test_readme_badge_toc_license_stripping(self):
+        from rag.chunking import chunk_readme
+
+        aceview_repo = next(r for r in TEST_GITHUB_REPOS if r["name"] == "aceview-cloud")
+        chunks = chunk_readme(
+            candidate_id=TEST_CANDIDATE_ID,
+            repo_name=aceview_repo["name"],
+            readme_text=aceview_repo["readme_text"],
+            repo_id=aceview_repo["id"],
+        )
+
+        self.assertGreater(len(chunks), 0)
+        # Acceptance criteria: Badge/TOC/license lines do not appear in any stored readme chunk text
+        for c in chunks:
+            text_lower = c.text.lower()
+            self.assertNotIn("shields.io", text_lower)
+            self.assertNotIn("[![build]", text_lower)
+            self.assertNotIn("[![license]", text_lower)
+            self.assertNotIn("mit license. copyright", text_lower)
+
+
 if __name__ == "__main__":
     unittest.main()
