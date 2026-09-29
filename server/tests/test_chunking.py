@@ -437,5 +437,101 @@ class TestTask7ChunkLevelCleanup(unittest.TestCase):
             self.assertNotIn("mit license. copyright", text_lower)
 
 
+class TestTask8StaleChunkTombstoning(unittest.TestCase):
+    def test_retrieval_query_excludes_soft_deleted_filter(self):
+        import uuid
+        from unittest.mock import MagicMock
+        from rag.retrival import retrieve
+
+        mock_session = MagicMock()
+        mock_session.execute.return_value.all.return_value = []
+
+        cand_id = uuid.uuid4()
+        retrieve(mock_session, "test query", cand_id)
+
+        self.assertTrue(mock_session.execute.called)
+        stmt = mock_session.execute.call_args[0][0]
+        sql_str = str(stmt)
+        # Asserts retrieval query contains the tombstone check
+        self.assertIn("rag_documents.deleted_at IS NULL", sql_str)
+
+    def test_tombstone_diff_and_soft_delete_live(self):
+        import uuid
+        from db.db import SessionLocal
+        from db.models import Profile, GithubRepository, RagDocument
+        from rag.chunking import build_all_chunks
+        from rag.embeddings import store_chunks
+        from rag.retrival import retrieve
+
+        from sqlalchemy import delete, select
+
+        try:
+            with SessionLocal() as session:
+                cand_id = session.scalars(select(Profile.id)).first()
+        except Exception:
+            self.skipTest("Database not reachable for live integration test")
+            return
+
+        if not cand_id:
+            self.skipTest("No Profile found in DB for live test")
+            return
+
+        with SessionLocal() as session:
+            # Clean existing for this candidate
+            session.execute(delete(RagDocument).where(RagDocument.user_id == cand_id))
+            session.execute(delete(GithubRepository).where(GithubRepository.user_id == cand_id))
+            session.commit()
+
+            repo1_id = uuid.UUID(TEST_GITHUB_REPOS[0]["id"])
+            repo2_id = uuid.UUID(TEST_GITHUB_REPOS[1]["id"])
+            gr1 = GithubRepository(id=repo1_id, user_id=cand_id, repo_name=TEST_GITHUB_REPOS[0]["name"])
+            gr2 = GithubRepository(id=repo2_id, user_id=cand_id, repo_name=TEST_GITHUB_REPOS[1]["name"])
+            session.add_all([gr1, gr2])
+            session.commit()
+
+            try:
+                # 1. Ingest with 2 repos
+                chunks1 = build_all_chunks(
+                    candidate_id=str(cand_id),
+                    github_repos=TEST_GITHUB_REPOS,
+                )
+                count1 = store_chunks(session, chunks1)
+                self.assertGreater(count1, 0)
+
+                # 2. Retrieve headingless tool chunks
+                res1 = retrieve(session, "data transformation batch processing", cand_id, k=5)
+                self.assertTrue(any(str(repo2_id) in r.chunk_id for r in res1))
+
+                # 3. Re-ingest with only 1 repo (aceview-cloud), removing headingless-tool
+                chunks2 = build_all_chunks(
+                    candidate_id=str(cand_id),
+                    github_repos=[TEST_GITHUB_REPOS[0]],
+                )
+                count2 = store_chunks(session, chunks2)
+                self.assertGreater(count2, 0)
+
+                # 4. Check that headingless-tool chunks are now tombstoned (deleted_at IS NOT NULL)
+                tombstoned = session.scalars(
+                    select(RagDocument).where(
+                        RagDocument.user_id == cand_id,
+                        RagDocument.deleted_at.is_not(None)
+                    )
+                ).all()
+                self.assertGreater(len(tombstoned), 0)
+                for t in tombstoned:
+                    self.assertIn(str(repo2_id), t.chunk_id)
+
+                # 5. Query retrieval and verify headingless-tool chunks are NO LONGER returned!
+                res2 = retrieve(session, "data transformation batch processing", cand_id, k=10)
+                self.assertFalse(
+                    any(str(repo2_id) in r.chunk_id for r in res2),
+                    "Soft-deleted chunks should not be returned by retrieval!"
+                )
+            finally:
+                session.execute(delete(RagDocument).where(RagDocument.user_id == cand_id))
+                session.execute(delete(GithubRepository).where(GithubRepository.user_id == cand_id))
+                session.commit()
+
+
 if __name__ == "__main__":
     unittest.main()
