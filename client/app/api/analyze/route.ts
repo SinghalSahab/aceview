@@ -11,7 +11,7 @@ export async function POST(request: Request) {
 
     const body = await request.json();
 
-    const fastapiUrl = process.env.FASTAPI_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+    const fastapiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
     const backendResponse = await fetch(`${fastapiUrl}/api/upload`, {
         method: "POST",
         headers: {
