@@ -25,10 +25,11 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
 from functools import lru_cache
-from transformers import AutoTokenizer
+from typing import Any, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers import AutoTokenizer
 
 try:
     from skills.skillExtractor import get_nlp
@@ -40,10 +41,28 @@ SourceType = Literal["resume", "skills", "project", "readme", "code_summary", "g
 TOKENIZER_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 @lru_cache(maxsize=1)
-def get_tokenizer() -> AutoTokenizer:
+def get_tokenizer():
+    from transformers import AutoTokenizer
     return AutoTokenizer.from_pretrained(TOKENIZER_MODEL_NAME)
 
-TOKENIZER = get_tokenizer()
+class _LazyTokenizer:
+    _instance = None
+
+    def _get_tok(self):
+        if self._instance is None:
+            self._instance = get_tokenizer()
+        return self._instance
+
+    def encode(self, *args, **kwargs):
+        return self._get_tok().encode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self._get_tok().decode(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._get_tok(), name)
+
+TOKENIZER = _LazyTokenizer()
 
 RESUME_MIN_TOKENS = 150
 RESUME_MAX_TOKENS = 300

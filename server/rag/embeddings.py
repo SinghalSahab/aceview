@@ -20,7 +20,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from sentence_transformers import SentenceTransformer
+from typing import Any, TYPE_CHECKING
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -35,12 +38,13 @@ EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 
 @lru_cache(maxsize=1)
-def get_embedding_model() -> SentenceTransformer:
+def get_embedding_model():
     """
     Loaded once per process (model load is cached, not reconstructed per request).
     FastAPI: call this once at app startup to warm the cache.
     Automatically authenticates with Hugging Face Hub using your token.
     """
+    from sentence_transformers import SentenceTransformer
     hf_token = os.environ.get("HUGGING_FACE_TOKEN", "").strip()
 
     if hf_token:

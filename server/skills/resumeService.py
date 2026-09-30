@@ -16,7 +16,10 @@ import re
 import uuid
 from typing import Any
 from urllib.parse import urlparse
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz
 from sqlalchemy.orm import Session
 
 from db.models import Profile, Resume, GithubRepository, AtsReport, GithubProfileSummary
