@@ -1,24 +1,4 @@
-"""
-Step 4.1 — Chunking strategy
 
-Produces rich chunks (with structured metadata) from candidate data sources:
-  - resume sections (Experience, Summary, Education, etc.)
-  - dedicated skills chunks (from resumes.skills JSONB array)
-  - dedicated project chunks (from resumes.projects JSONB / project link annotations)
-  - GitHub README markdown (split by heading sections)
-  - per-repo code-analysis summaries & metrics (from Step 3 & github_repositories table)
-
-Each chunk is a dict matching:
-  {
-    "candidate_id": str,
-    "source_type": str,  # "resume" | "skills" | "project" | "readme" | "code_summary"
-    "section": str,
-    "chunk_id": str,
-    "text": str,
-    "repo_id": str | None,
-    "metadata": dict
-  }
-"""
 
 from __future__ import annotations
 
