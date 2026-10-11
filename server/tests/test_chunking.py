@@ -163,6 +163,38 @@ class TestTask3ProjectKey(unittest.TestCase):
         offline_chunks = [c for c in chunks if c["metadata"].get("project_key") == "offline-analyzer"]
         self.assertGreaterEqual(len(offline_chunks), 1)
         self.assertEqual(offline_chunks[0]["source_type"], "project")
+        self.assertIsNone(offline_chunks[0]["repo_id"])
+
+    def test_project_repo_id_explicit_linkage(self):
+        chunks = build_all_chunks(
+            candidate_id=TEST_CANDIDATE_ID,
+            resume_sections=TEST_RESUME_SECTIONS,
+            resume_skills=TEST_RESUME_SKILLS,
+            resume_projects=TEST_RESUME_PROJECTS,
+            resume_links=TEST_PROJECT_LINKS,
+            years_of_experience=5.0,
+            github_repos=TEST_GITHUB_REPOS,
+            github_profile_summary=TEST_GITHUB_PROFILE_SUMMARY,
+        )
+
+        expected_repo_id = TEST_GITHUB_REPOS[0]["id"]
+        # 1. Project chunks matching aceview-cloud must have repo_id set
+        aceview_proj_chunks = [
+            c for c in chunks
+            if c["source_type"] == "project" and c["metadata"].get("project_key") == "aceview-cloud"
+        ]
+        self.assertGreater(len(aceview_proj_chunks), 0)
+        for pc in aceview_proj_chunks:
+            self.assertEqual(pc["repo_id"], expected_repo_id)
+            self.assertEqual(pc["metadata"].get("repo_id"), expected_repo_id)
+            self.assertEqual(pc["metadata"].get("github_repo_name"), "aceview-cloud")
+
+        # 2. All chunks sharing this repo_id (project, readme, code_summary, claim)
+        repo_chunks = [c for c in chunks if c.get("repo_id") == expected_repo_id]
+        sources_with_repo_id = {c["source_type"] for c in repo_chunks}
+        self.assertIn("project", sources_with_repo_id)
+        self.assertIn("readme", sources_with_repo_id)
+        self.assertIn("code_summary", sources_with_repo_id)
 
 
 class TestTask4CodeSummarySplit(unittest.TestCase):

@@ -290,14 +290,61 @@ def chunk_skills(
     return chunks
 
 
+def _find_matching_repo(
+    title: str,
+    url: str = "",
+    github_repos: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Finds matching repository from github_repos for a resume project using:
+    1. Direct URL exact match
+    2. Extracted repo slug from github.com URL matching repo name
+    3. project_name attribute attached during GitHub profile resolution
+    4. Deterministic normalized slug match between project title and repo name
+    """
+    if not github_repos:
+        return None
+
+    target_url = (url or "").strip().lower().rstrip("/")
+    parsed_target_repo = None
+    if target_url:
+        m = re.search(r"github\.com/([^/]+)/([^/#?]+)", target_url)
+        if m:
+            parsed_target_repo = normalize_project_key(m.group(2).removesuffix(".git"))
+
+    title_key = normalize_project_key(title)
+
+    for repo in github_repos:
+        repo_url = (repo.get("url") or "").strip().lower().rstrip("/")
+        repo_name = (repo.get("name") or repo.get("repo_name") or "").strip()
+        repo_key = normalize_project_key(repo_name)
+        project_name = (repo.get("project_name") or "").strip()
+        project_name_key = normalize_project_key(project_name)
+
+        if target_url and repo_url and target_url == repo_url:
+            return repo
+
+        if parsed_target_repo and repo_key and parsed_target_repo == repo_key:
+            return repo
+
+        if project_name_key and title_key and project_name_key == title_key:
+            return repo
+
+        if title_key and repo_key and title_key == repo_key:
+            return repo
+
+    return None
+
+
 def chunk_projects(
     candidate_id: str,
     projects: list[dict[str, Any]] | list[str] | None = None,
     project_links: list[dict[str, Any]] | None = None,
+    github_repos: list[dict[str, Any]] | None = None,
 ) -> list[Chunk]:
     """
     Creates dedicated project chunks from structured projects list (resumes.projects)
-    and project link annotations.
+    and project link annotations, explicitly linking to github_repos when matched.
     """
     chunks: list[Chunk] = []
 
@@ -309,6 +356,10 @@ def chunk_projects(
                 tech = proj.get("technologies") or proj.get("skills") or []
                 url = proj.get("url") or proj.get("link") or ""
 
+                matching_repo = _find_matching_repo(title, url, github_repos)
+                matched_repo_id = str(matching_repo["id"]) if (matching_repo and matching_repo.get("id")) else None
+                matched_repo_name = (matching_repo.get("name") or matching_repo.get("repo_name")) if matching_repo else None
+
                 tech_str = ", ".join(tech) if isinstance(tech, list) else str(tech)
                 text_parts = [f"Project: {title}"]
                 if desc:
@@ -319,35 +370,56 @@ def chunk_projects(
                     text_parts.append(f"Link: {url}")
 
                 full_text = "\n".join(text_parts)
-                proj_key = normalize_project_key(title)
+                proj_key = normalize_project_key(matched_repo_name or title)
+
+                meta: dict[str, Any] = {
+                    "section": f"project:{title}",
+                    "project_name": title,
+                    "project_key": proj_key,
+                    "description": desc,
+                    "technologies": tech if isinstance(tech, list) else ([tech_str] if tech_str else []),
+                    "url": url,
+                }
+                if matched_repo_id:
+                    meta["repo_id"] = matched_repo_id
+                    meta["github_repo_id"] = matched_repo_id
+                    meta["github_repo_name"] = matched_repo_name
+                    if matching_repo.get("url"):
+                        meta["github_url"] = matching_repo.get("url")
+
                 chunks.append(
                     Chunk(
                         candidate_id=candidate_id,
                         source_type="project",
                         section=f"project:{title}",
                         text=full_text,
-                        metadata={
-                            "section": f"project:{title}",
-                            "project_name": title,
-                            "project_key": proj_key,
-                            "description": desc,
-                            "technologies": tech if isinstance(tech, list) else ([tech_str] if tech_str else []),
-                            "url": url,
-                        },
+                        repo_id=matched_repo_id,
+                        metadata=meta,
                     )
                 )
             elif isinstance(proj, str) and proj.strip():
-                proj_key = normalize_project_key(proj.strip()[:40]) or f"project-{idx + 1}"
+                matching_repo = _find_matching_repo(proj.strip(), "", github_repos)
+                matched_repo_id = str(matching_repo["id"]) if (matching_repo and matching_repo.get("id")) else None
+                matched_repo_name = (matching_repo.get("name") or matching_repo.get("repo_name")) if matching_repo else None
+
+                proj_key = normalize_project_key(matched_repo_name or proj.strip()[:40]) or f"project-{idx + 1}"
+                meta = {
+                    "section": f"project:{idx + 1}",
+                    "project_key": proj_key,
+                }
+                if matched_repo_id:
+                    meta["repo_id"] = matched_repo_id
+                    meta["github_repo_id"] = matched_repo_id
+                    meta["github_repo_name"] = matched_repo_name
+
                 chunks.append(
                     Chunk(
                         candidate_id=candidate_id,
                         source_type="project",
                         section=f"project:{idx + 1}",
                         text=proj.strip(),
-                        metadata={
-                            "section": f"project:{idx + 1}",
-                            "project_key": proj_key,
-                        },
+                        repo_id=matched_repo_id,
+                        metadata=meta,
                     )
                 )
 
@@ -357,21 +429,33 @@ def chunk_projects(
                 uri = p_link.get("uri") or p_link.get("url") or ""
                 context = p_link.get("context") or p_link.get("anchor") or ""
                 proj_name = p_link.get("project_name") or p_link.get("repo_name") or "Project Link"
-                proj_key = normalize_project_key(proj_name)
+
+                matching_repo = _find_matching_repo(proj_name, uri, github_repos)
+                matched_repo_id = str(matching_repo["id"]) if (matching_repo and matching_repo.get("id")) else None
+                matched_repo_name = (matching_repo.get("name") or matching_repo.get("repo_name")) if matching_repo else None
+
+                proj_key = normalize_project_key(matched_repo_name or proj_name)
                 if uri:
+                    meta = {
+                        "section": f"project_link:{proj_name}",
+                        "project_name": proj_name,
+                        "project_key": proj_key,
+                        "url": uri,
+                        "context": context,
+                    }
+                    if matched_repo_id:
+                        meta["repo_id"] = matched_repo_id
+                        meta["github_repo_id"] = matched_repo_id
+                        meta["github_repo_name"] = matched_repo_name
+
                     chunks.append(
                         Chunk(
                             candidate_id=candidate_id,
                             source_type="project",
                             section=f"project_link:{proj_name}",
                             text=f"Project Link: {proj_name}\nURL: {uri}\nContext: {context}",
-                            metadata={
-                                "section": f"project_link:{proj_name}",
-                                "project_name": proj_name,
-                                "project_key": proj_key,
-                                "url": uri,
-                                "context": context,
-                            },
+                            repo_id=matched_repo_id,
+                            metadata=meta,
                         )
                     )
     for c in chunks:
@@ -430,6 +514,7 @@ def chunk_resume(
     projects: list[dict[str, Any]] | list[str] | None = None,
     project_links: list[dict[str, Any]] | None = None,
     years_of_experience: float | int | None = None,
+    github_repos: list[dict[str, Any]] | None = None,
 ) -> list[Chunk]:
     """
     sections: output of section splitter, e.g.
@@ -446,9 +531,16 @@ def chunk_resume(
     if skills:
         chunks.extend(chunk_skills(candidate_id, skills))
 
-    # 2. Dedicated structured project chunks
+    # 2. Dedicated structured project chunks (linked to github_repos if matched)
     if projects or project_links:
-        chunks.extend(chunk_projects(candidate_id, projects=projects, project_links=project_links))
+        chunks.extend(
+            chunk_projects(
+                candidate_id,
+                projects=projects,
+                project_links=project_links,
+                github_repos=github_repos,
+            )
+        )
 
     # 3. Standard text section chunks (Experience, Education, Summary, etc.)
     if sections:
@@ -917,22 +1009,29 @@ def chunk_claim(
     claims: list[Chunk] = []
     seen_texts: set[str] = set()
 
-    # Known project keys and titles for attribution
+    # Known project keys, titles, and repo_ids for attribution
     project_map: dict[str, str] = {}
+    project_repo_map: dict[str, str] = {}
     for pc in project_chunks:
         meta = pc.metadata if isinstance(pc, Chunk) else pc.get("metadata", {})
         pkey = meta.get("project_key")
         pname = meta.get("project_name")
+        p_repo_id = getattr(pc, "repo_id", None) or meta.get("repo_id")
         if pkey:
             project_map[pkey.lower()] = pkey
+            if p_repo_id:
+                project_repo_map[pkey.lower()] = str(p_repo_id)
         if pname and pkey:
             project_map[pname.lower()] = pkey
+            if p_repo_id:
+                project_repo_map[pname.lower()] = str(p_repo_id)
 
     # 1. Extract from project chunks
     for pc in project_chunks:
         text = pc.text if isinstance(pc, Chunk) else pc.get("text", "")
         meta = pc.metadata if isinstance(pc, Chunk) else pc.get("metadata", {})
         pkey = meta.get("project_key")
+        pc_repo_id = getattr(pc, "repo_id", None) or meta.get("repo_id")
 
         lines = [line.strip().lstrip("-•* ").strip() for line in text.split("\n") if line.strip()]
         for line in lines:
@@ -965,12 +1064,16 @@ def chunk_claim(
                     "verified": False,
                     "detected_tech": extract_tech_entities(s_clean),
                 }
+                if pc_repo_id:
+                    c_meta["repo_id"] = str(pc_repo_id)
+
                 claim_chunk = Chunk(
                     candidate_id=candidate_id,
                     source_type="claim",
                     section=f"claim:{claim_type}",
                     chunk_id=chunk_id,
                     text=s_clean,
+                    repo_id=str(pc_repo_id) if pc_repo_id else None,
                     metadata=c_meta,
                 )
                 assert_within_model_limit(claim_chunk.text, claim_chunk.chunk_id)
@@ -1010,18 +1113,23 @@ def chunk_claim(
                 claim_hash = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{candidate_id}:{s_clean}"))[:12]
                 chunk_id = f"{candidate_id}-claim-{claim_hash}"
 
+                claim_repo_id = project_repo_map.get(attr_pkey.lower()) if attr_pkey else None
                 c_meta = {
                     "claim_type": claim_type,
                     "project_key": attr_pkey,
                     "verified": False,
                     "detected_tech": extract_tech_entities(s_clean),
                 }
+                if claim_repo_id:
+                    c_meta["repo_id"] = str(claim_repo_id)
+
                 claim_chunk = Chunk(
                     candidate_id=candidate_id,
                     source_type="claim",
                     section=f"claim:{claim_type}",
                     chunk_id=chunk_id,
                     text=s_clean,
+                    repo_id=str(claim_repo_id) if claim_repo_id else None,
                     metadata=c_meta,
                 )
                 assert_within_model_limit(claim_chunk.text, claim_chunk.chunk_id)
@@ -1103,6 +1211,7 @@ def build_all_chunks(
                 projects=resume_projects,
                 project_links=project_links,
                 years_of_experience=years_of_experience,
+                github_repos=github_repos,
             )
         )
 
