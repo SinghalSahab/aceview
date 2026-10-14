@@ -464,47 +464,189 @@ def chunk_projects(
     return chunks
 
 
+# Boundary regexes for multi-section logical entry splitting
+DATE_HEADER_RE = re.compile(
+    r"(?:\((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\.?\s*\d{4}\s*[-–—to]\s*(?:present|current|now|\d{4})\)|\b(?:19|20)\d{2}\s*[-–—]\s*(?:present|current|now|(?:19|20)\d{2})\b|\b\d{1,2}/\d{4}\s*[-–—to]\s*(?:\d{1,2}/\d{4}|present|current|now)\b)",
+    re.I,
+)
+
+BULLET_START_RE = re.compile(
+    r"^\s*(?:[\-\*•–▪●►\u2022\u25CF\u25AA]|\d+[\.\)]|\[\d+\])\s+"
+)
+
+DEGREE_START_RE = re.compile(
+    r"\b(?:b\.?s\.?|b\.?tech|b\.?e\.?|b\.?a\.?|bachelor|m\.?s\.?|m\.?tech|m\.?e\.?|m\.?a\.?|master|mba|ph\.?d|doctorate|associate|diploma)\b",
+    re.I,
+)
+
+INSTITUTION_RE = re.compile(
+    r"\b(?:university|college|institute|polytechnic|academy|school)\b",
+    re.I,
+)
+
+ROLE_KEYWORDS_RE = re.compile(
+    r"\b(?:engineer|developer|lead|manager|architect|intern|analyst|consultant|specialist|director|founder|co-founder|cto|vp|fellow|researcher|scientist|administrator)\b",
+    re.I,
+)
+
+PROJECT_MARKER_RE = re.compile(
+    r"^(?:project\s*\d*[:\-]|title\s*[:\-]|app\s*[:\-])",
+    re.I,
+)
+
+
+def _is_new_entry_start(line: str, s_name_lower: str, next_line: str = "") -> bool:
+    """Detects whether a line marks the beginning of a new logical entry in a given section."""
+    clean_line = line.strip()
+    if not clean_line:
+        return False
+
+    is_bullet = bool(BULLET_START_RE.match(clean_line))
+
+    # Hierarchical sections have parent entries (job, degree, project) and sub-bullet points.
+    # In these sections, bullets are details of the entry, so they must NOT start a new entry!
+    is_hierarchical_section = any(k in s_name_lower for k in [
+        "experience", "work", "employment", "career", "job",
+        "education", "academic", "academics", "degree", "university",
+        "project", "portfolio"
+    ])
+    if is_bullet and is_hierarchical_section:
+        return False
+
+    # 1. Achievements / Awards / Certifications / Honors / Publications / Extracurricular
+    if any(k in s_name_lower for k in [
+        "achievement", "accomplishment", "award", "honor", "honour",
+        "certif", "license", "publication", "extracurricular", "activity",
+        "volunteer", "leadership", "competency"
+    ]):
+        # Top-level bullet points or numbered lists represent discrete items
+        if is_bullet:
+            return True
+        # Date-bearing lines (e.g., "National Hackathon Winner - 2023")
+        if re.search(r"\b(?:19|20)\d{2}\b", clean_line) and len(clean_line) < 100:
+            return True
+
+    # 2. Experience / Work / Employment
+    if any(k in s_name_lower for k in ["experience", "work", "employment", "career", "job"]):
+        if not is_bullet:
+            if DATE_HEADER_RE.search(clean_line):
+                return True
+            if ROLE_KEYWORDS_RE.search(clean_line) and any(sep in clean_line for sep in [" | ", " at ", " @ ", " - ", " – ", " — "]):
+                return True
+
+    # 3. Education / Academics
+    if any(k in s_name_lower for k in ["education", "academic", "academics", "degree", "university"]):
+        if not is_bullet:
+            if DATE_HEADER_RE.search(clean_line):
+                return True
+            if DEGREE_START_RE.search(clean_line) or INSTITUTION_RE.search(clean_line):
+                return True
+
+    # 4. Projects / Personal Projects
+    if any(k in s_name_lower for k in ["project", "portfolio"]):
+        if PROJECT_MARKER_RE.match(clean_line):
+            return True
+        if not is_bullet:
+            if (len(clean_line) <= 75 and
+                (any(sep in clean_line for sep in [" | ", " - ", " – ", " — "]) or
+                 bool(BULLET_START_RE.match(next_line.strip())) or
+                 any(tag in next_line.lower() for tag in ["tech", "tools", "stack", "github", "built"]))):
+                return True
+
+    # 5. Generic bullet lists: if the section has multiple bullet lines, each bullet is an entry
+    if is_bullet:
+        return True
+
+    return False
+
+
+def _split_single_block_into_entries(section_name: str, block_text: str) -> list[str]:
+    """Splits a single block of lines into discrete logical entries based on section type."""
+    cleaned = block_text.strip()
+    if not cleaned:
+        return []
+
+    s_name_lower = section_name.lower()
+    lines = cleaned.split("\n")
+
+    if len(lines) <= 1:
+        return [cleaned]
+
+    entry_blocks: list[list[str]] = []
+    current_block: list[str] = []
+
+    for i, line in enumerate(lines):
+        clean_l = line.strip()
+        if not clean_l:
+            continue
+        next_l = lines[i + 1].strip() if i + 1 < len(lines) else ""
+
+        if _is_new_entry_start(line, s_name_lower, next_l) and current_block:
+            entry_blocks.append(current_block)
+            current_block = [line]
+        else:
+            current_block.append(line)
+
+    if current_block:
+        entry_blocks.append(current_block)
+
+    if len(entry_blocks) > 1:
+        return ["\n".join(b).strip() for b in entry_blocks if "\n".join(b).strip()]
+
+    # 6. Fallback for long unstructured prose (e.g. Summary / Profile) using spaCy sentence segmentation
+    tokens = count_tokens(cleaned)
+    if tokens > 200:
+        try:
+            nlp = get_nlp()
+            doc = nlp(cleaned)
+            sentences = [s.text.strip() for s in doc.sents if s.text.strip()]
+            if len(sentences) > 1:
+                grouped_sents: list[str] = []
+                cur_group: list[str] = []
+                cur_toks = 0
+                for s in sentences:
+                    s_toks = count_tokens(s)
+                    if cur_toks + s_toks > 180 and cur_group:
+                        grouped_sents.append(" ".join(cur_group))
+                        cur_group = [s]
+                        cur_toks = s_toks
+                    else:
+                        cur_group.append(s)
+                        cur_toks += s_toks
+                if cur_group:
+                    grouped_sents.append(" ".join(cur_group))
+                if len(grouped_sents) > 1:
+                    return grouped_sents
+        except Exception:
+            pass
+
+    return [cleaned]
+
+
 def _split_into_logical_entries(section_name: str, section_text: str) -> list[str]:
     """
-    Splits a resume section into discrete logical entries (e.g. one job, one degree,
-    one summary paragraph) before windowing.
+    Splits a resume section into discrete logical entries across all section types:
+    - Experience/Work: Discrete jobs by date ranges or role/company headers
+    - Education: Discrete degrees by degree keywords, institutions, or dates
+    - Projects: Discrete projects by project titles, headers, or bulleted blocks
+    - Achievements/Awards/Certifications/Publications: Discrete entries per top-level bullet point or dated line
+    - Summary/Objective/Other: Paragraphs or spaCy sentence groups
     """
     cleaned = section_text.strip()
     if not cleaned:
         return []
 
-    # 1. Try splitting by double newlines first (standard paragraph separation)
-    blocks = [b.strip() for b in re.split(r"\n\s*\n+", cleaned) if b.strip()]
-    if len(blocks) > 1:
-        return blocks
+    # 1. Standard double-newline paragraph separation
+    raw_blocks = [b.strip() for b in re.split(r"\n\s*\n+", cleaned) if b.strip()]
+    if len(raw_blocks) > 1:
+        refined: list[str] = []
+        for b in raw_blocks:
+            sub = _split_single_block_into_entries(section_name, b)
+            refined.extend(sub if sub else [b])
+        return refined if refined else raw_blocks
 
-    # 2. If no blank lines, check if it's Experience or Education and split on date boundaries or company/role headers
-    s_name_lower = section_name.lower()
-    if any(k in s_name_lower for k in ["experience", "work", "employment", "education"]):
-        lines = cleaned.split("\n")
-        entry_blocks: list[list[str]] = []
-        current_block: list[str] = []
-
-        date_header_re = re.compile(
-            r"(?:\((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\.?\s*\d{4}\s*[-–—to]\s*(?:present|current|now|\d{4})\)|\b(?:19|20)\d{2}\s*[-–—]\s*(?:present|current|now|(?:19|20)\d{2})\b)",
-            re.I,
-        )
-
-        for line in lines:
-            is_bullet = line.strip().startswith(("-", "*", "•", "–"))
-            if not is_bullet and date_header_re.search(line) and current_block:
-                entry_blocks.append(current_block)
-                current_block = [line]
-            else:
-                current_block.append(line)
-
-        if current_block:
-            entry_blocks.append(current_block)
-
-        if len(entry_blocks) > 1:
-            return ["\n".join(b).strip() for b in entry_blocks if "\n".join(b).strip()]
-
-    return blocks if blocks else [cleaned]
+    # 2. Single block without double newlines — apply intelligent section-aware boundary detection
+    return _split_single_block_into_entries(section_name, cleaned)
 
 
 def chunk_resume(

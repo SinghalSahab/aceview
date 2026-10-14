@@ -428,7 +428,55 @@ class TestTask7ChunkLevelCleanup(unittest.TestCase):
         self.assertTrue(techcorp_found)
         self.assertTrue(startuplabs_found)
 
-    def test_headingless_readme_produces_multiple_chunks(self):
+    def test_split_into_logical_entries_multi_section(self):
+        from rag.chunking import _split_into_logical_entries
+
+        # 1. Achievements (bullet points without blank lines)
+        achievements_raw = (
+            "• Won 1st Place in National AI Hackathon (2023) against 150 teams.\n"
+            "  Built an autonomous agent framework.\n"
+            "• Awarded Dean's Honor Roll for 4 consecutive semesters (2021-2023).\n"
+            "• Published research paper on distributed vector indexing at IEEE."
+        )
+        ach_entries = _split_into_logical_entries("Achievements", achievements_raw)
+        self.assertEqual(len(ach_entries), 3)
+        self.assertIn("National AI Hackathon", ach_entries[0])
+        self.assertIn("Dean's Honor Roll", ach_entries[1])
+        self.assertIn("Published research paper", ach_entries[2])
+
+        # 2. Projects (titles with pipes / tech stack without blank lines)
+        projects_raw = (
+            "AceView Cloud | React, FastAPI, Redis\n"
+            "- Real-time AI technical interview simulator\n"
+            "- Reduced latency by 40% with cache layer\n"
+            "Data Pipeline Engine | Python, Kafka, PostgreSQL\n"
+            "- Ingested 50k events/sec with fault tolerance"
+        )
+        proj_entries = _split_into_logical_entries("Projects", projects_raw)
+        self.assertEqual(len(proj_entries), 2)
+        self.assertIn("AceView Cloud", proj_entries[0])
+        self.assertIn("Data Pipeline Engine", proj_entries[1])
+
+        # 3. Certifications (dated entries without blank lines)
+        certs_raw = (
+            "AWS Certified Solutions Architect - Associate (2023)\n"
+            "Certified Kubernetes Administrator - CKA (2022)\n"
+            "HashiCorp Certified Terraform Associate (2021)"
+        )
+        cert_entries = _split_into_logical_entries("Certifications", certs_raw)
+        self.assertEqual(len(cert_entries), 3)
+
+        # 4. Long Summary with multiple sentences using spaCy boundary segmentation
+        summary_raw = (
+            "Senior Software Engineer specializing in distributed cloud native systems and machine learning pipelines. "
+            "Extensive experience architecting microservices with FastAPI, Redis, Kafka, and PostgreSQL handling millions of daily requests. "
+            "Proven track record of improving latency by 40% and cutting deployment pipeline times by 35% in high-velocity agile environments. "
+            "Passionate about vector databases, LLM orchestration, and high-performance backend systems with automated testing and Kubernetes deployment."
+        )
+        summary_entries = _split_into_logical_entries("Summary", summary_raw)
+        self.assertGreaterEqual(len(summary_entries), 1)
+        for se in summary_entries:
+            self.assertTrue(se.endswith("."))
         from rag.chunking import chunk_readme
 
         headingless_repo = next(r for r in TEST_GITHUB_REPOS if r["name"] == "headingless-tool")
